@@ -102,6 +102,12 @@ class Dispatcher:
             name: asyncio.Queue() for name in registry.by_name
         }
 
+    def add(self, agent: str) -> asyncio.Queue:
+        return self._queues.setdefault(agent, asyncio.Queue())
+
+    def remove(self, agent: str) -> None:
+        self._queues.pop(agent, None)
+
     def queue(self, agent: str) -> asyncio.Queue:
         return self._queues[agent]
 

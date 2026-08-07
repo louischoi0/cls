@@ -15,9 +15,10 @@ import re
 import shutil
 import signal
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol
 
 from .logstore import LogStore, LogStoreError
 from .models import AgentConfig
@@ -37,6 +38,23 @@ class Job:
     agent: str
     text: str
     topic: str
+    #: set when this job is a project task, so an observer can write the
+    #: outcome back to the task row (docs/PROJECTS.md FR-P3)
+    task_id: str | None = None
+    #: resolved with the RunResult when the caller needs to await this one run.
+    #: A planning round uses it to go *through* the manager's queue instead of
+    #: around it, so the manager's session is still never resumed concurrently.
+    future: "asyncio.Future | None" = field(default=None, repr=False, compare=False)
+
+
+class JobObserver(Protocol):
+    """Notified around one job. Failures here never fail the job."""
+
+    async def job_started(self, job: Job) -> bool:
+        """False drops the job before `claude` is spawned (a cancelled task)."""
+        ...
+
+    async def job_finished(self, job: Job, result: "RunResult") -> None: ...
 
 
 @dataclass
@@ -140,6 +158,7 @@ class AgentWorker:
         logstore: LogStore,
         status,
         claude_bin: str,
+        observer: JobObserver | None = None,
     ) -> None:
         self.agent = agent
         self.queue = queue
@@ -147,6 +166,7 @@ class AgentWorker:
         self.logstore = logstore
         self.status = status
         self.claude_bin = claude_bin
+        self.observer = observer
         self.busy = False
 
     async def run(self) -> None:
@@ -156,6 +176,7 @@ class AgentWorker:
             try:
                 await self._process(job)
             except asyncio.CancelledError:
+                _settle(job, RunResult(False, "worker was cancelled"))
                 raise
             except Exception:
                 # A bug in our own bookkeeping must not take the worker down;
@@ -167,11 +188,23 @@ class AgentWorker:
                 )
                 self.status.mark_failed(job.message_id, self.agent.name, "internal error")
             finally:
+                # A caller awaiting this job must never be left hanging, however
+                # the job ended.
+                _settle(job, RunResult(False, "job ended without a result"))
                 self.busy = False
                 self.queue.task_done()
 
     async def _process(self, job: Job) -> None:
         self.status.mark_running(job.message_id, self.agent.name)
+        if not await self._job_started(job):
+            # Cancelled while it sat in the queue. Dropping it here is the only
+            # cancellation that costs nothing; once `claude` is running,
+            # timeout_s is the only stop.
+            self.status.mark_failed(
+                job.message_id, self.agent.name, "cancelled before it ran"
+            )
+            _settle(job, RunResult(False, "cancelled before it ran"))
+            return
         started = datetime.now()
 
         result = await self._invoke(job.text)
@@ -203,6 +236,23 @@ class AgentWorker:
             self.status.mark_done(job.message_id, self.agent.name)
         else:
             self.status.mark_failed(job.message_id, self.agent.name, result.result_text)
+
+        if self.observer is not None:
+            try:
+                await self.observer.job_finished(job, result)
+            except Exception:
+                log.exception("observer failed to record %s", job.message_id)
+        _settle(job, result)
+
+    async def _job_started(self, job: Job) -> bool:
+        if self.observer is None:
+            return True
+        try:
+            return await self.observer.job_started(job)
+        except Exception:
+            # An observer that cannot answer must not silently swallow the job.
+            log.exception("observer failed to open %s", job.message_id)
+            return True
 
     async def _invoke(self, text: str) -> RunResult:
         session_id = self.sessions.get(self.agent.name)
@@ -272,6 +322,12 @@ class AgentWorker:
             )
 
         return _parse_result(out, err, duration)
+
+
+def _settle(job: Job, result: RunResult) -> None:
+    """Resolve a job's future once. Later calls are the safety net, not the answer."""
+    if job.future is not None and not job.future.done():
+        job.future.set_result(result)
 
 
 def _kill_tree(proc: asyncio.subprocess.Process) -> None:

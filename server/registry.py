@@ -35,6 +35,30 @@ class Registry:
             for tag in [agent.name, *agent.tags]:
                 self._by_tag.setdefault(tag, []).append(agent.name)
 
+    def add(self, agent: AgentConfig, extra_tags: list[str] | None = None) -> None:
+        """Register an agent after startup (project agents, docs/PROJECTS.md FR-P2).
+
+        `extra_tags` carries tags the AgentConfig validator refuses because they
+        are dispatcher-reserved — `project:<id>` is minted here, not claimed by
+        a config file, so it is safe at this level.
+        """
+        if agent.name in self.by_name:
+            raise RegistryError(f"duplicate agent name {agent.name!r}")
+        self.by_name[agent.name] = agent
+        for tag in [agent.name, *agent.tags, *(extra_tags or [])]:
+            names = self._by_tag.setdefault(tag, [])
+            if agent.name not in names:
+                names.append(agent.name)
+
+    def remove(self, name: str) -> None:
+        if self.by_name.pop(name, None) is None:
+            raise RegistryError(f"unknown agent {name!r}")
+        for tag, names in list(self._by_tag.items()):
+            if name in names:
+                names.remove(name)
+            if not names:
+                del self._by_tag[tag]
+
     @property
     def names(self) -> list[str]:
         return list(self.by_name)

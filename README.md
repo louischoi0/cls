@@ -29,8 +29,10 @@ API Server (FastAPI, single process)
     ├── Dispatcher             — tag → target agent(s) → per-agent queue
     ├── Agent Runner (workers) — one worker per agent, serialized execution
     │       └── subprocess: claude -p --resume <session_id> --output-format json
+    ├── Project Store          — KDS, or SQLite (docs/kds-backend.md)
     ├── Log Store              — logs/{YYYY-MM-DD}/{topic}.md
-    └── Query API              — list/read logs
+    ├── Query API              — list/read logs
+    └── Console (web/)         — static browser UI, served at /web/
 ```
 
 ## 4. Functional Requirements
@@ -152,6 +154,8 @@ cc-automation/
 ## 10. Out of Scope (v1)
 
 - Dynamic agent creation/deletion via API.
+  *(Superseded: `docs/PROJECTS.md` adds this, scoped to a project and driven by
+  that project's projectmanager.)*
 - Durable message queue (Redis, SQLite).
 - Webhook callbacks on completion.
 - Multi-user auth, key rotation.

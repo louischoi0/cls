@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cls · project console</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#9635;</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">cls<span>console</span></a>
+    <nav id="nav">
+      <a href="#/">Projects</a>
+      <a href="#/agents">Agents</a>
+      <a href="#/tasks">Tasks</a>
+      <a href="#/logs">Logs</a>
+    </nav>
+    <div class="topbar-right">
+      <span id="pulse" class="pulse" title="idle"></span>
+      <button id="theme" class="icon-btn" title="Toggle theme">◐</button>
+      <button id="keybtn" class="icon-btn" title="API key">⚿</button>
+    </div>
+  </header>
+
+  <main id="view" aria-live="polite"></main>
+
+  <div id="toasts" class="toasts"></div>
+
+  <dialog id="keydialog">
+    <form method="dialog" id="keyform">
+      <h2>API key</h2>
+      <p class="muted">
+        Every request needs <code>X-API-Key</code>. The key is read from
+        <code>~/.cc-automation/api_key</code> on the server; paste the same value
+        here. It is kept in this browser's localStorage only.
+      </p>
+      <input type="password" id="keyinput" placeholder="paste the key" autocomplete="off" spellcheck="false">
+      <div class="row end">
+        <!-- type=button so Enter in the field reaches Save, the only submitter -->
+        <button type="button" id="keycancel" class="ghost">Cancel</button>
+        <button value="save" id="keysave" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="render.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
