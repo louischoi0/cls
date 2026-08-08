@@ -50,6 +50,16 @@ class Registry:
             if agent.name not in names:
                 names.append(agent.name)
 
+    def replace(self, agent: AgentConfig) -> None:
+        """Swap one agent's configuration for a new one.
+
+        Only settings change — the name and tags are the same, so the tag index
+        it is filed under does not move.
+        """
+        if agent.name not in self.by_name:
+            raise RegistryError(f"unknown agent {agent.name!r}")
+        self.by_name[agent.name] = agent
+
     def remove(self, name: str) -> None:
         if self.by_name.pop(name, None) is None:
             raise RegistryError(f"unknown agent {name!r}")

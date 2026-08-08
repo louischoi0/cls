@@ -18,12 +18,22 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .logstore import LogStore, LogStoreError
 from .models import AgentConfig
+from .stream import StreamHub, describe
 
 log = logging.getLogger("cc_automation.runner")
+
+#: One stream-json line can carry a whole tool result. The asyncio default of
+#: 64KiB would tear those in half; this is the cap past which a line is dropped
+#: rather than buffered without limit.
+MAX_LINE = 1 << 20
+#: Enough stderr to explain a failure, not enough to hold a run's worth of noise.
+MAX_STDERR_LINES = 200
+#: Same, for lines on stdout that were not JSON at all.
+MAX_NOISE_LINES = 20
 
 # `claude` refuses to --resume an id it has never seen; that is recoverable.
 _SESSION_GONE = re.compile(
@@ -41,6 +51,8 @@ class Job:
     #: set when this job is a project task, so an observer can write the
     #: outcome back to the task row (docs/PROJECTS.md FR-P3)
     task_id: str | None = None
+    #: git branch this work belongs to, recorded in the log entry
+    branch: str | None = None
     #: resolved with the RunResult when the caller needs to await this one run.
     #: A planning round uses it to go *through* the manager's queue instead of
     #: around it, so the manager's session is still never resumed concurrently.
@@ -55,6 +67,15 @@ class JobObserver(Protocol):
         ...
 
     async def job_finished(self, job: Job, result: "RunResult") -> None: ...
+
+    def worker_idle(self, agent: str) -> None:
+        """The worker has let the job go and is free again.
+
+        Distinct from `job_finished`, which runs while the job is still in
+        flight: anything that reports *what an agent is doing* has to be told
+        after the worker clears it, or it records the finished job forever.
+        """
+        ...
 
 
 @dataclass
@@ -136,11 +157,17 @@ def build_argv(
     Message text is passed as an argv element, never through a shell, so its
     content cannot become a command.
     """
-    argv = [claude_bin, "-p", text, "--output-format", "json"]
+    # stream-json emits one JSON object per line as the run happens, which is
+    # what makes live output possible. Its final `result` object carries the
+    # same fields the old single-shot `json` format did, so nothing downstream
+    # of `_parse_result` changed. The CLI requires --verbose alongside it.
+    argv = [claude_bin, "-p", text, "--output-format", "stream-json", "--verbose"]
     argv += ["--resume", session_id] if resume else ["--session-id", session_id]
     if agent.allowed_tools:
         argv += ["--allowedTools", ",".join(agent.allowed_tools)]
     argv += ["--permission-mode", agent.permission_mode]
+    if agent.model:
+        argv += ["--model", agent.model]
     if agent.system_prompt:
         # Append rather than replace: --system-prompt would drop Claude Code's
         # own tool instructions and leave the agent unable to work.
@@ -159,6 +186,8 @@ class AgentWorker:
         status,
         claude_bin: str,
         observer: JobObserver | None = None,
+        env_provider: "Callable[[str], dict[str, str]] | None" = None,
+        hub: StreamHub | None = None,
     ) -> None:
         self.agent = agent
         self.queue = queue
@@ -167,12 +196,23 @@ class AgentWorker:
         self.status = status
         self.claude_bin = claude_bin
         self.observer = observer
+        # Looked up per spawn rather than held on the config: credentials must
+        # not live in something the API serialises back out.
+        self.env_provider = env_provider
+        self.hub = hub
         self.busy = False
+        #: the job in flight, so callers can see *what* it is busy with
+        self.current: Job | None = None
+        #: non-JSON stdout from the run in flight, kept only to explain a failure
+        self._noise: list[str] = []
+        #: the run whose events are being published, keyed by message id
+        self.stream_key: str | None = None
 
     async def run(self) -> None:
         while True:
             job = await self.queue.get()
             self.busy = True
+            self.current = job
             try:
                 await self._process(job)
             except asyncio.CancelledError:
@@ -192,7 +232,9 @@ class AgentWorker:
                 # the job ended.
                 _settle(job, RunResult(False, "job ended without a result"))
                 self.busy = False
+                self.current = None
                 self.queue.task_done()
+                self._worker_idle()
 
     async def _process(self, job: Job) -> None:
         self.status.mark_running(job.message_id, self.agent.name)
@@ -207,7 +249,17 @@ class AgentWorker:
             return
         started = datetime.now()
 
-        result = await self._invoke(job.text)
+        # The run is keyed by message id: a task has one, and so does a plain
+        # message, so both are watchable without a second identifier.
+        if self.hub is not None:
+            self.stream_key = job.message_id
+            self.hub.open(job.message_id, self.agent.name)
+        try:
+            result = await self._invoke(job.text)
+        finally:
+            if self.hub is not None:
+                self.hub.close(job.message_id)
+                self.stream_key = None
 
         body = result.result_text
         if result.session_was_reset:
@@ -223,6 +275,7 @@ class AgentWorker:
                 when=started,
                 agent=self.agent.name,
                 message_id=job.message_id,
+                branch=job.branch,
                 text=job.text,
                 result=body,
                 duration_s=result.duration_s,
@@ -243,6 +296,14 @@ class AgentWorker:
             except Exception:
                 log.exception("observer failed to record %s", job.message_id)
         _settle(job, result)
+
+    def _worker_idle(self) -> None:
+        if self.observer is None:
+            return
+        try:
+            self.observer.worker_idle(self.agent.name)
+        except Exception:
+            log.exception("observer failed to record %s going idle", self.agent.name)
 
     async def _job_started(self, job: Job) -> bool:
         if self.observer is None:
@@ -279,6 +340,16 @@ class AgentWorker:
             self.sessions.set(self.agent.name, result.session_id)
         return result
 
+    def _env(self) -> dict[str, str]:
+        env = scrubbed_env()
+        if self.env_provider is not None:
+            try:
+                env.update(self.env_provider(self.agent.name))
+            except Exception:
+                # Missing credentials degrade the run; they do not stop it.
+                log.exception("could not build the environment for %s", self.agent.name)
+        return env
+
     async def _spawn(self, text: str, session_id: str, resume: bool) -> RunResult:
         argv = build_argv(self.claude_bin, self.agent, text, session_id, resume)
         loop = asyncio.get_running_loop()
@@ -290,16 +361,22 @@ class AgentWorker:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.agent.cwd),
-                env=scrubbed_env(),
+                env=self._env(),
                 start_new_session=True,  # own process group, so we can kill the tree
+                # One stream-json line carries a whole tool result, which the
+                # default 64KiB would split into a LimitOverrunError.
+                limit=MAX_LINE,
             )
         except OSError as exc:
             return RunResult(False, f"could not start `claude`: {exc}")
 
+        errors: list[str] = []
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self.agent.timeout_s
+            final, err = await asyncio.wait_for(
+                asyncio.gather(self._read_stream(proc.stdout), _drain(proc.stderr, errors)),
+                timeout=self.agent.timeout_s,
             )
+            await proc.wait()
         except asyncio.TimeoutError:
             _kill_tree(proc)
             await proc.wait()
@@ -310,18 +387,71 @@ class AgentWorker:
             )
 
         duration = loop.time() - started
-        out = stdout.decode("utf-8", "replace").strip()
-        err = stderr.decode("utf-8", "replace").strip()
+        err = "\n".join(errors).strip()
+
+        # A non-zero exit with a `result` object is the CLI explaining itself —
+        # a budget cap, a permission stop. Reporting "exited 1" instead would
+        # throw that away and leave the operator with nothing to act on.
+        if final is not None:
+            return _parse_result(final, err, duration)
 
         if proc.returncode != 0:
-            detail = err or out or "(no output)"
+            detail = err or "\n".join(self._noise) or "(no output)"
             return RunResult(
                 False,
                 f"`claude` exited {proc.returncode}: {detail}",
                 duration_s=duration,
             )
 
-        return _parse_result(out, err, duration)
+        return _parse_result(final, err, duration)
+
+    async def _read_stream(self, stdout) -> dict | None:
+        """Consume the run line by line, publishing as it goes.
+
+        Returns the last `result` object, which is the one that says how the run
+        ended. Everything else is narration: useful to watch, not to keep.
+        """
+        final: dict | None = None
+        self._noise = []
+        while True:
+            try:
+                line = await stdout.readline()
+            except (ValueError, asyncio.LimitOverrunError):
+                # A single line past MAX_LINE. Skipping it loses one event, not
+                # the run; the `result` object is small and still to come.
+                log.warning("agent %s: dropped an over-long output line", self.agent.name)
+                continue
+            if not line:
+                return final
+            raw = line.decode("utf-8", "replace").strip()
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                # Not an event worth showing, but when a run dies without ever
+                # reaching a `result` object, these lines are the only account
+                # of why — so a few are kept for the failure message.
+                log.debug("agent %s: non-JSON output line %.120r", self.agent.name, raw)
+                if len(self._noise) < MAX_NOISE_LINES:
+                    self._noise.append(raw)
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if _is_final(payload):
+                final = payload
+            self._publish(payload)
+
+    def _publish(self, payload: dict) -> None:
+        if self.stream_key is None or self.hub is None:
+            return
+        try:
+            described = describe(payload)
+            if described is not None:
+                self.hub.publish(self.stream_key, *described)
+        except Exception:
+            # Narration must never be able to fail a run.
+            log.exception("could not publish a stream event for %s", self.agent.name)
 
 
 def _settle(job: Job, result: RunResult) -> None:
@@ -340,21 +470,36 @@ def _kill_tree(proc: asyncio.subprocess.Process) -> None:
             pass
 
 
-def _parse_result(stdout: str, stderr: str, duration: float) -> RunResult:
-    """Read the CLI's JSON result, tolerating a shape we did not expect."""
-    if not stdout:
-        return RunResult(False, f"`claude` produced no output. stderr: {stderr or '(empty)'}",
-                         duration_s=duration)
-    try:
-        data = json.loads(stdout)
-    except json.JSONDecodeError:
-        return RunResult(False, f"could not parse `claude` JSON output:\n{stdout}",
-                         duration_s=duration)
+def _is_final(payload: dict) -> bool:
+    """Whether this object is the one that says how the run ended.
 
-    if isinstance(data, list):
-        data = next((d for d in reversed(data) if isinstance(d, dict)), None)
-    if not isinstance(data, dict) or not data:
-        return RunResult(False, f"unexpected `claude` JSON output:\n{stdout}",
+    `type: "result"` is what the CLI tags it with. An untagged object carrying
+    `result` or `is_error` counts too, so a run that answers in the older
+    single-object shape is still read rather than reported as no output.
+    """
+    kind = payload.get("type")
+    if kind == "result":
+        return True
+    return kind is None and ("result" in payload or "is_error" in payload)
+
+
+async def _drain(stream, into: list[str]) -> None:
+    """Collect stderr so a failure can say why, without unbounded growth."""
+    while True:
+        try:
+            line = await stream.readline()
+        except (ValueError, asyncio.LimitOverrunError):
+            continue
+        if not line:
+            return
+        if len(into) < MAX_STDERR_LINES:
+            into.append(line.decode("utf-8", "replace").rstrip())
+
+
+def _parse_result(data: dict | None, stderr: str, duration: float) -> RunResult:
+    """Read the run's final `result` object, tolerating a shape we did not expect."""
+    if not data:
+        return RunResult(False, f"`claude` produced no result. stderr: {stderr or '(empty)'}",
                          duration_s=duration)
 
     # Only a JSON object carrying a string `result` counts as a real answer;
@@ -362,7 +507,12 @@ def _parse_result(stdout: str, stderr: str, duration: float) -> RunResult:
     text = data.get("result")
     has_result = isinstance(text, str)
     if not has_result:
-        text = f"unexpected `claude` JSON output:\n{json.dumps(data, indent=2)}"
+        # A budget or permission stop has no `result`, but does say why.
+        errors = data.get("errors")
+        if isinstance(errors, list) and errors:
+            text = "; ".join(str(e) for e in errors)
+        else:
+            text = f"unexpected `claude` JSON output:\n{json.dumps(data, indent=2)}"
 
     cost = data.get("total_cost_usd")
     cost = float(cost) if isinstance(cost, (int, float)) else None

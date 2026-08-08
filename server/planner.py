@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from .models import (
     MAX_PLAN_ACTIONS,
     PLAN_ACTION_ADAPTER,
+    IssueCreate,
     Plan,
     PlanResult,
     ProjectAgentCreate,
@@ -37,13 +38,24 @@ log = logging.getLogger("cc_automation.planner")
 #: kill and reports the timeout rather than racing it.
 PLAN_WAIT_MARGIN_S = 60
 
+#: Answered questions put in front of the manager. Enough to carry a round's
+#: worth of decisions, not so many that old ones crowd out the new.
+ANSWERS_SHOWN = 12
+
 ACTION_SCHEMA = """\
 {"op": "create_agent", "name": "<name>", "system_prompt": "<what it is for>",
  "allowed_tools": ["Read", ...], "cwd": "<path relative to the project root>",
  "max_budget_usd": <float>, "timeout_s": <int>}
 {"op": "delete_agent", "name": "<name>"}
-{"op": "create_task", "agent": "<agent name>", "title": "<short>", "text": "<the instruction>"}
+{"op": "create_task", "agent": "<agent name>", "title": "<short>",
+ "text": "<the instruction>", "branch": "<git branch, optional>",
+ "milestone_id": "<the goal this serves, optional>"}
+{"op": "assign_task", "task_id": "<id from the backlog>", "agent": "<agent name>",
+ "branch": "<git branch, optional>", "milestone_id": "<optional>"}
 {"op": "cancel_task", "task_id": "<id>"}
+{"op": "raise_issue", "title": "<what is blocking>", "body": "<detail>",
+ "kind": "decision|crash|blocker", "agent": "<agent name, optional>"}
+{"op": "resolve_issue", "issue_id": "<id>", "resolution": "<what settled it>"}
 {"op": "note", "text": "<observation, recorded but not acted on>"}\
 """
 
@@ -117,6 +129,44 @@ def build_prompt(
         f"- {t.id} [{t.status}] {t.agent}: {t.title}" for t in open_tasks
     ) or "(none)"
 
+    backlog = service.store.list_tasks(project.id, status="backlog", limit=60)
+    backlog_block = "\n".join(
+        f"- {t.id}: {t.title}" for t in backlog
+    ) or "(none)"
+
+    milestones = service.store.list_milestones(project.id)
+    open_tasks_all = service.store.list_tasks(project.id, limit=1000)
+    milestone_block = "\n".join(
+        f"- {m.id} [{m.status}] {m.title}"
+        + (f" — target: {m.target}" if m.target else "")
+        + (f"\n    {m.body.strip()[:300]}" if m.body.strip() else "")
+        + "\n    tasks: {} done / {} total".format(
+            sum(1 for t in open_tasks_all
+                if t.milestone_id == m.id and t.status == "done"),
+            sum(1 for t in open_tasks_all if t.milestone_id == m.id),
+        )
+        for m in milestones
+    ) or "(none — the operator has not set any goals yet)"
+
+    issues = service.store.list_issues(project.id, status="open")
+    issues_block = "\n".join(
+        f"- {i.id} [{i.kind}] {i.title}"
+        + (f" (agent {i.agent})" if i.agent else "")
+        + (f"\n    {i.body.strip()[:300]}" if i.body.strip() else "")
+        for i in issues
+    ) or "(none)"
+
+    # The operator's answers. Without these the console's promise — "the manager
+    # reads this on its next planning round" — would simply not be true: a
+    # resolved issue leaves the open list and is never seen again.
+    answered = [
+        i for i in service.store.list_issues(project.id, status="resolved", limit=200)
+        if i.resolution
+    ][:ANSWERS_SHOWN]
+    answers_block = "\n".join(
+        f"- {i.title}\n    answer: {i.resolution.strip()[:400]}" for i in answered
+    ) or "(none)"
+
     finished = [
         t
         for t in service.store.list_tasks(project.id, limit=40)
@@ -139,8 +189,24 @@ maintaining a set of worker agents and assigning them tasks.
 # Current agents
 {roster}
 
+# Milestones — the operator's goals. You cannot create, edit or close these;
+# your job is to move them forward by creating tasks against them.
+{milestone_block}
+
 # Open tasks
 {open_block}
+
+# Backlog — work already written down, given to nobody. Most of this came from
+# the project's own documents. Assign it rather than restating it as a new task.
+{backlog_block}
+
+# Open issues — these are what is blocking the project. A `decision` raised by
+# an agent is a question waiting on the operator; you cannot answer it yourself.
+{issues_block}
+
+# Answered — the operator has since decided these. Act on them: this is the only
+# time they will be put in front of you.
+{answers_block}
 
 # Recently finished tasks
 {finished_block}
@@ -152,9 +218,17 @@ maintaining a set of worker agents and assigning them tasks.
 - You cannot create, delete, or assign work to a projectmanager.
 - At most {MAX_PLAN_ACTIONS} actions per plan.
 - Do not re-create an agent that already exists, and do not duplicate a task
-  that is already open.
+  that is already open. If the backlog already describes the work, `assign_task`
+  it; do not write it out again as a new task.
 - Prefer few, well-scoped tasks. A task's `text` is the entire instruction the
   worker will receive; it has no other context.
+- A **milestone** is a goal the operator set. You cannot create or close one —
+  put `milestone_id` on the tasks you create so the work counts toward it, and
+  raise an issue if a goal is blocked or looks wrong.
+- An **issue** is something blocking progress that a task cannot simply do: a
+  decision someone has to make, or a run that broke unexpectedly. Raise one
+  instead of inventing a task when you are blocked or need a human. Resolve one
+  when the plan you are making settles it.
 {f"- The operator adds: {note}" if note else ""}
 
 # Reply format
@@ -296,7 +370,36 @@ async def _apply_one(
 
     if op == "create_task":
         task = await service.create_task(
-            project, action.agent, action.title, action.text, created_by="manager"
+            project, action.agent, action.title, action.text,
+            created_by="manager", branch=action.branch,
+            milestone_id=action.milestone_id,
+        )
+        outcome.tasks_created.append(task.id)
+        return
+
+    if op == "raise_issue":
+        issue = service.raise_issue(
+            project,
+            IssueCreate(title=action.title, body=action.body, kind=action.kind,
+                        agent=action.agent, branch=action.branch),
+            created_by="manager",
+        )
+        outcome.issues_raised.append(issue.id)
+        return
+
+    if op == "resolve_issue":
+        issue = service.store.get_issue(action.issue_id)
+        if issue is None or issue.project_id != project.id:
+            raise ProjectError(404, f"unknown issue {action.issue_id!r} in this project")
+        service.close_issue(action.issue_id, action.resolution, dismiss=False)
+        return
+
+    if op == "assign_task":
+        if service.require_agent(project, action.agent).role == "manager":
+            raise ProjectError(422, "the projectmanager may not assign tasks to itself")
+        task = await service.assign_task(
+            project, action.task_id, action.agent,
+            branch=action.branch, milestone_id=action.milestone_id,
         )
         outcome.tasks_created.append(task.id)
         return

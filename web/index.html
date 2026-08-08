@@ -11,12 +11,26 @@
   <header class="topbar">
     <a class="brand" href="#/">cls<span>console</span></a>
     <nav id="nav">
-      <a href="#/">Projects</a>
-      <a href="#/agents">Agents</a>
-      <a href="#/tasks">Tasks</a>
+      <!--
+        No "Projects" item: the selector on the right is the one place a project
+        is chosen. A nav link to the list would be a second way to designate the
+        scope, and the two would disagree. The list is still there — the brand
+        opens it, which is also where a new project is created.
+      -->
+      <!-- Follows the project selector: the dashboard for whatever is scoped. -->
+      <a href="#/dashboard" id="nav-dashboard">Dashboard</a>
+      <a href="#/terminal">Terminal</a>
       <a href="#/logs">Logs</a>
+      <a href="#/search">Search</a>
     </nav>
     <div class="topbar-right">
+      <!-- Global scope: every page filters by whatever is chosen here. -->
+      <select id="project-select" class="mono" title="Scope every page to one project">
+        <option value="">all projects</option>
+      </select>
+      <!-- The list is no longer in the nav, so the way to add one lives beside
+           the selector it will appear in. -->
+      <a href="#/" id="nav-projects" class="icon-btn" title="All projects — and where a new one is created">＋</a>
       <span id="pulse" class="pulse" title="idle"></span>
       <button id="theme" class="icon-btn" title="Toggle theme">◐</button>
       <button id="keybtn" class="icon-btn" title="API key">⚿</button>
@@ -35,7 +49,11 @@
         <code>~/.cc-automation/api_key</code> on the server; paste the same value
         here. It is kept in this browser's localStorage only.
       </p>
+      <p id="keyerror" class="reject" hidden></p>
       <input type="password" id="keyinput" placeholder="paste the key" autocomplete="off" spellcheck="false">
+      <label class="row" style="gap:6px;margin:-8px 0 14px">
+        <input type="checkbox" id="keyreveal" style="width:auto"> show the key
+      </label>
       <div class="row end">
         <!-- type=button so Enter in the field reaches Save, the only submitter -->
         <button type="button" id="keycancel" class="ghost">Cancel</button>

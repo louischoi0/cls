@@ -55,7 +55,7 @@ def test_later_runs_resume(agent):
 
 def test_argv_carries_agent_config(agent):
     argv = build_argv("claude", agent, "hi", "s", resume=False)
-    assert argv[:5] == ["claude", "-p", "hi", "--output-format", "json"]
+    assert argv[:6] == ["claude", "-p", "hi", "--output-format", "stream-json", "--verbose"]
     assert argv[argv.index("--allowedTools") + 1] == "Read,Grep"
     assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
     assert argv[argv.index("--max-budget-usd") + 1] == "0.25"
@@ -80,16 +80,14 @@ def test_scrubbed_env_drops_session_markers(monkeypatch):
 
 
 def test_parse_result_reads_the_cli_shape():
-    payload = json.dumps(
-        {
-            "type": "result",
-            "is_error": False,
-            "result": "pong",
-            "session_id": "abc",
-            "total_cost_usd": 0.02,
-            "duration_ms": 2500,
-        }
-    )
+    payload = {
+        "type": "result",
+        "is_error": False,
+        "result": "pong",
+        "session_id": "abc",
+        "total_cost_usd": 0.02,
+        "duration_ms": 2500,
+    }
     res = _parse_result(payload, "", 99.0)
     assert (res.ok, res.result_text, res.session_id) == (True, "pong", "abc")
     assert res.cost_usd == 0.02
@@ -97,10 +95,10 @@ def test_parse_result_reads_the_cli_shape():
 
 
 def test_parse_result_flags_is_error():
-    assert not _parse_result(json.dumps({"is_error": True, "result": "boom"}), "", 1).ok
+    assert not _parse_result({"is_error": True, "result": "boom"}, "", 1).ok
 
 
-@pytest.mark.parametrize("payload", ["", "not json", "[]", "3"])
+@pytest.mark.parametrize("payload", [None, {}, {"type": "result"}, {"result": 3}])
 def test_parse_result_survives_unexpected_output(payload):
     res = _parse_result(payload, "stderr detail", 1.0)
     assert res.ok is False and res.result_text

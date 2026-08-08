@@ -20,6 +20,7 @@ from .logstore import LogStore
 from .models import AgentConfig
 from .registry import Registry
 from .runner import AgentWorker, JobObserver, SessionStore
+from .stream import StreamHub
 
 log = logging.getLogger("cc_automation.pool")
 
@@ -37,6 +38,8 @@ class AgentPool:
         worker_factory: Callable[..., AgentWorker] = AgentWorker,
         start_workers: bool = True,
         observer: JobObserver | None = None,
+        env_provider=None,
+        hub: StreamHub | None = None,
     ) -> None:
         self.registry = registry
         self.dispatcher = dispatcher
@@ -47,6 +50,9 @@ class AgentPool:
         self.worker_factory = worker_factory
         self.start_workers = start_workers
         self.observer = observer
+        self.env_provider = env_provider
+        #: shared by every worker; a run is keyed by message id, which is unique
+        self.hub = hub or StreamHub()
         self.workers: dict[str, AgentWorker] = {}
         self.tasks: dict[str, asyncio.Task] = {}
 
@@ -60,6 +66,8 @@ class AgentPool:
             status=self.status,
             claude_bin=self.claude_bin,
             observer=self.observer,
+            env_provider=self.env_provider,
+            hub=self.hub,
         )
         self.workers[agent.name] = worker
         if self.start_workers:
@@ -72,6 +80,18 @@ class AgentPool:
         """Register an agent and start it. Raises RegistryError on a name clash."""
         self.registry.add(agent, extra_tags)
         return self.start(agent)
+
+    def reconfigure(self, agent: AgentConfig) -> None:
+        """Give an existing agent new settings, keeping its queue and worker.
+
+        A run already in flight keeps the settings it was spawned with — its
+        command line was built before this call. The next job off the queue uses
+        the new ones.
+        """
+        self.registry.replace(agent)
+        worker = self.workers.get(agent.name)
+        if worker is not None:
+            worker.agent = agent
 
     async def remove(self, name: str) -> None:
         task = self.tasks.pop(name, None)

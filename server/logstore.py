@@ -73,6 +73,7 @@ class LogStore:
         agent: str,
         message_id: str,
         text: str,
+        branch: str | None = None,
         result: str,
         duration_s: float,
         cost_usd: float | None,
@@ -80,8 +81,13 @@ class LogStore:
     ) -> Path:
         path = self.path_for(date, topic)
         cost = "unknown" if cost_usd is None else f"{cost_usd:.4f}"
+        # The branch is part of the heading, not the meta line: it is how you
+        # read a day's log as "what happened on this branch".
+        head = f"## [{when.strftime('%H:%M:%S')}] agent: {agent} | message: {message_id}"
+        if branch:
+            head += f" | branch: {branch}"
         entry = (
-            f"## [{when.strftime('%H:%M:%S')}] agent: {agent} | message: {message_id}\n\n"
+            f"{head}\n\n"
             f"**Input:** {text}\n\n"
             f"**Result:**\n{result}\n\n"
             f"**Meta:** duration={duration_s:.1f}s, cost_usd={cost}, status={status}\n\n"

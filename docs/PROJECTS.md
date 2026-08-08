@@ -97,15 +97,44 @@ another project. `project_id` is a slug derived from the project name.
   `project:{pid}` (fan-out) and `agent:{pid}__{name}`. `project:` joins
   `session:` and `agent:` as a prefix `agents.yaml` may not claim.
 
+- `PATCH /projects/{pid}/agents/{name}` changes an agent's settings in place,
+  keeping its **session, its queue and its worker**. This is the only sane way
+  to retune one: the runtime name is what the session is filed under, so
+  recreating an agent to change a budget risks stranding the conversation it
+  depends on.
+  - Patchable: `system_prompt`, `allowed_tools`, `permission_mode`, `model`,
+    `max_budget_usd`, `timeout_s`. Omitted means "leave alone"; `""` clears
+    `system_prompt` or `model`.
+  - Not patchable: `name` and `role` — the first is what it is keyed by, the
+    second a database constraint — and `cwd`, because every agent in a project
+    works in the project's directory.
+  - The new settings go through `build_config`, the same gate a new agent's do,
+    so a patch cannot grant tools outside the project's `tool_policy`.
+  - A run already in flight finishes on the settings it was spawned with; the
+    next job off the queue uses the new ones.
+- `PATCH /projects/{pid}` accepts `tool_policy`, the ceiling on what this
+  project's agents may be granted. Widening it grants nothing retroactively —
+  an agent's `allowed_tools` was resolved when it was created. Narrowing below
+  what an existing agent already holds is refused (`409`, naming the agent and
+  the tool): a policy its own agents violate is not the truth about the project.
+
 ### FR-P3: Tasks
 - `POST /projects/{pid}/tasks` accepts `{ agent, title, text }` → `201`. The
   task is enqueued on that agent immediately.
-- Status: `queued → running → done | failed`, or `cancelled` from `queued`.
+- **Omitting `agent` files the task in the backlog** instead: the work is
+  written down, given to nobody, and nothing is dispatched or spent. A backlog
+  row has no `agent` and no `message_id`; every other status implies both.
+- `POST /projects/{pid}/tasks/{tid}/assign` accepts `{ agent, branch?,
+  milestone_id? }` and moves the row `backlog → queued` under that agent, which
+  is what enqueues it. It is a compare-and-set on the status, so two callers
+  racing to assign the same task cannot both enqueue it; the loser gets `409`.
+- Status: `backlog → queued → running → done | failed`, or `cancelled` from
+  either `backlog` or `queued`.
 - A task's run is an ordinary message: it produces a log entry under topic
   `{pid}` (README FR-4) and its result text, cost and error are written back to
   the task row.
-- `POST /tasks/{tid}/cancel` — only from `queued`. A running task is not
-  interrupted; `timeout_s` is the only hard stop.
+- `POST /tasks/{tid}/cancel` — only from `queued` or `backlog`. A running task
+  is not interrupted; `timeout_s` is the only hard stop.
 - `GET /tasks?status=&project=` queries **across projects**, which is the point
   of the store. `GET /tasks/{tid}` returns one task with its result.
 - On startup, tasks left `queued` are re-enqueued; tasks left `running` are
@@ -144,6 +173,7 @@ models add it and failing the round over punctuation is not useful.
      "allowed_tools": ["Read", "Edit", "Write"], "cwd": "services/api"},
     {"op": "delete_agent", "name": "scratch"},
     {"op": "create_task", "agent": "api-dev", "title": "...", "text": "..."},
+    {"op": "assign_task", "task_id": "...", "agent": "api-dev"},
     {"op": "cancel_task", "task_id": "..."},
     {"op": "note", "text": "free-text observation, recorded only"}
   ]
@@ -156,6 +186,84 @@ Server-enforced limits, each producing a rejection rather than an error:
 - The manager may not create, delete, or assign tasks to a `manager` agent.
 - `create_task` must name an agent that exists after the plan's own
   `create_agent` actions are applied — actions are applied in order.
+- `assign_task` only moves a task that is still in the backlog. The prompt shows
+  the manager that backlog, with the instruction to assign what is already
+  written down rather than restate it as a new task.
+
+### FR-P8: A worker asking the operator
+
+A run cannot stop and wait for a person: `claude -p` is print mode, so there is
+no channel back into a run once it is spawned, and every agent runs
+`bypassPermissions`, so the CLI never pauses to ask either. What an agent can do
+is finish and leave the question behind — which is what an issue already is.
+
+Only the projectmanager has the plan protocol, so a worker uses a fenced block:
+
+```` markdown
+```ask
+The one-line question
+Any detail the operator needs to answer it.
+```
+````
+
+- Parsed out of a **successful** run's result by `job_finished`, into an open
+  `decision` issue with `created_by = "agent"`, inheriting the task's agent,
+  branch and milestone so the board keeps its shape. A failed run reports its
+  crash instead; one failure, one issue.
+- Asking does not replace answering. The blocks stay in the stored result — the
+  record should show what was asked.
+- At most 5 questions per run. More than that is a malfunction, not a question,
+  and the excess is dropped with a warning rather than kept silently.
+- The convention is appended to every task's text rather than kept in a system
+  prompt, because an agent may have been created without one.
+- The console marks these `asked`, and answering one is resolving it.
+- **The planning prompt shows recently answered issues**, not only open ones.
+  Without that the answer would go nowhere: a resolved issue leaves the open list
+  and would never be seen again.
+
+### FR-P6: Importing documents
+
+`POST /projects/{pid}/milestones/import` accepts
+`{ paths?, dry_run?, tasks?, issues? }`. A path may be a file or a directory
+(scanned for `*.md`, one level deep); nothing given means `docs/`.
+
+Each document becomes **one milestone**, and the work it describes becomes rows
+under that milestone:
+
+- A list under a heading that names work — *task breakdown, acceptance criteria,
+  checklist, to-do, deliverables* — becomes one **backlog task** each.
+- A list under a heading that names an unknown — *open questions, risks,
+  blockers, TBD* — becomes one **open issue** each, `decision` or `blocker`
+  according to the heading.
+- Prose is left alone. A document is mostly prose, and a parser that guessed at
+  paragraphs would turn one design doc into fifty bad tasks.
+- A ticked `- [x]` item is history, not work, and is skipped.
+- The document's own `#` title names the document, not a section of it, so it
+  never classifies — otherwise "Work Instruction: … and Tasks" would swallow the
+  whole file, since headings inherit the kind of the one above.
+- Each imported row carries the item's own text plus `(imported from
+  <file> § <heading>)`; the agent that runs it has never seen the document.
+
+Importing is idempotent per document: a milestone remembers the file it came
+from, so a second run picks up only what is new, and its tasks and issues come
+in exactly once with it. `dry_run` reports the counts without writing anything.
+
+### FR-P7: The `cls/` directory
+
+Every time an agent's state changes — created, deleted, given a task, starting
+one, finishing one, or the server restarting — its snapshot is rewritten to
+`{root_dir}/cls/agents/{name}.json`: configuration, what it is doing now, what
+is queued behind it, its open issues, and what it has cost.
+
+- Written whole and swapped in with `os.replace`, so a reader never sees half a
+  file. The directory is created on demand by the first agent a project gains.
+- The "finished" snapshot is written on a separate `worker_idle` hook rather
+  than in `job_finished`: the worker still holds the job there, and a snapshot
+  written then would record the agent as busy with something it had finished.
+- It is a **mirror, not a source**. Nothing is ever read back, and a write that
+  fails is logged and dropped — bookkeeping must never fail the request or the
+  worker loop that triggered it.
+- `agents.yaml` agents belong to no project directory and are not mirrored.
 
 ## 5. Storage
 
@@ -171,9 +279,16 @@ projects(id PK, name, root_dir, tool_policy JSON, created_at)
 agents(id PK, project_id FK, name, runtime_name UNIQUE, role, config JSON,
        created_at, UNIQUE(project_id, name))
 CREATE UNIQUE INDEX ... ON agents(project_id) WHERE role = 'manager';
-tasks(id PK, project_id FK, agent, title, text, status, created_by,
-      message_id, result, error, cost_usd, created_at, started_at, finished_at)
+tasks(id PK, project_id FK, agent NULL, title, text, status, created_by,
+      message_id NULL, result, error, cost_usd, created_at, started_at,
+      finished_at,
+      CHECK (status IN ('backlog','cancelled') OR agent IS NOT NULL))
 ```
+
+`agent` and `message_id` are null while a task is in the backlog, and stay null
+if such a task is cancelled — it was never anyone's. A CHECK cannot be altered
+in place, so a database written before `backlog` existed has its `tasks` table
+rebuilt at startup, detected by the constraint text itself.
 
 ## 6. Acceptance criteria
 
@@ -188,6 +303,19 @@ tasks(id PK, project_id FK, agent, title, text, status, created_by,
 - [ ] `create_agent` with `cwd: "../.."` is rejected.
 - [ ] After a restart, `queued` tasks run and `running` tasks are `failed`.
 - [ ] `GET /tasks?status=failed` returns failures from every project.
+- [ ] Importing a document creates one milestone, a backlog task per work item
+      and an open issue per open question — and dispatches nothing.
+- [ ] Importing the same document twice does not duplicate any of it.
+- [ ] A backlog task can be assigned exactly once; the second attempt is `409`.
+- [ ] An agent's `cls/agents/{name}.json` shows it idle after its task finishes,
+      not still working on it.
+- [ ] A `cls/` directory that cannot be written does not fail the request.
+- [ ] Patching an agent's budget keeps its session id and its queue.
+- [ ] A patch cannot grant an agent tools outside the project's `tool_policy`.
+- [ ] Narrowing a `tool_policy` below what an agent already holds is refused.
+- [ ] A worker's ```` ```ask ```` block becomes an open `decision` issue against
+      its task, and prose containing a question mark does not.
+- [ ] Resolving that issue puts the answer in the manager's next planning prompt.
 
 ## 7. Out of scope
 
