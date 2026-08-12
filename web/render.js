@@ -393,22 +393,33 @@ function chatTranscript(messages) {
   return messages.map(chatBubble).join('');
 }
 
-/** The conversation list down the side. One row per session. */
+/** The conversation list down the side. One row per session.
+ *
+ * The `×` removes the session *from this console only*: the Claude Code
+ * conversation it is linked to stays on disk and can be linked again. A button
+ * cannot nest inside a button, so the row and its `×` are siblings under one
+ * wrapper rather than one control containing another.
+ */
 function chatRail(sessions, selected) {
   if (!sessions || !sessions.length) {
     return html`<p class="empty">No sessions. <strong>+ new</strong> makes one.</p>`;
   }
   return sessions.map((s) => html`
-    <button type="button" class="rail-row ${s.name === selected ? 'on' : ''}"
-            data-chat="${s.name}" title="${s.cwd}">
-      <span class="rail-mark" aria-hidden="true">${s.name === selected ? '▸' : ' '}</span>
-      <span class="rail-name">${s.name}</span>
-      <span class="rail-meta">
-        ${s.busy || s.queue_depth
-          ? raw(html`<span class="dot busy" title="running"></span>`)
-          : raw(html`<span class="rail-turns">${s.turns || 0}</span>`)}
-      </span>
-    </button>`).join('');
+    <div class="rail-item ${s.name === selected ? 'on' : ''}">
+      <button type="button" class="rail-row ${s.name === selected ? 'on' : ''}"
+              data-chat="${s.name}" title="${s.cwd}">
+        <span class="rail-mark" aria-hidden="true">${s.name === selected ? '▸' : ' '}</span>
+        <span class="rail-name">${s.name}</span>
+        <span class="rail-meta">
+          ${s.busy || s.queue_depth
+            ? raw(html`<span class="dot busy" title="running"></span>`)
+            : raw(html`<span class="rail-turns">${s.turns || 0}</span>`)}
+        </span>
+      </button>
+      <button type="button" class="icon-btn rail-del" data-del="${s.name}"
+              aria-label="Remove ${s.name} from the console"
+              title="Remove from the console — the Claude Code conversation stays on disk">×</button>
+    </div>`).join('');
 }
 
 /** The title line over the transcript: who this is, and what it may do. */
@@ -426,7 +437,7 @@ function chatHeader(session) {
       ${session.model ? raw(html`<span class="term-title-model">${session.model}</span>`) : ''}
       ${raw(cliLink(session))}
       <button type="button" class="linkish" id="chat-clear" title="Forget this transcript. The session itself keeps its memory.">clear</button>
-      <button type="button" class="linkish danger" id="chat-delete" title="Delete the session and everything it said">rm</button>
+      <button type="button" class="linkish danger" id="chat-delete" title="Remove from the console — the Claude Code conversation stays on disk">rm</button>
     </div>`;
 }
 

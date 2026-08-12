@@ -591,8 +591,11 @@ def test_the_stylesheet_only_covers_classes_the_page_uses():
     dynamic = {"busy", "error", "on", "mine", "theirs", "failed", "pending",
                "no-rail", "caret", "danger", "send", "none", "result", "end"}
     # Backticks too: some classes are only ever set through a template literal
-    # (`node.className = `toast ${...}``), which quotes alone would miss.
-    used = set(re.findall(r"[\"'` ]([a-z][a-z0-9-]+)[\"'` ]", sources))
+    # (`node.className = `toast ${...}``), which quotes alone would miss. The
+    # trailing delimiter is a lookahead so it is not consumed — otherwise the
+    # space in `class="icon-btn rail-del"` is eaten by the first match and the
+    # second class can never be seen.
+    used = set(re.findall(r"[\"'` ]([a-z][a-z0-9-]+)(?=[\"'` ])", sources))
     unused = styled - used - dynamic
     assert not unused, f"styled but never used: {sorted(unused)}"
 
@@ -606,3 +609,46 @@ def test_ctrl_l_focuses_the_prompt():
 def test_the_hint_names_the_keys():
     js_source = (WEB / "render.js").read_text(encoding="utf-8")
     assert "ctrl+l" in js_source and "ctrl+b" in js_source
+
+
+def test_each_row_offers_a_web_only_delete(js):
+    """The `×` removes the console's copy; the CLI conversation is not its
+    business, and the affordance has to say so before it is clicked."""
+    sessions = [{"name": "alpha", "cwd": "/tmp", "turns": 2}]
+    out = js.ctx.eval(f"chatRail({json.dumps(sessions)}, 'alpha')")
+    assert 'data-del="alpha"' in out
+    assert "stays on disk" in out
+    assert 'aria-label="Remove alpha from the console"' in out
+
+
+def test_the_delete_control_is_not_nested_inside_the_row_button():
+    """A button inside a button is invalid, and browsers recover from it in
+    ways that lose the inner click."""
+    source = (WEB / "render.js").read_text(encoding="utf-8")
+    rail = source.split("function chatRail(")[1].split("\nfunction ")[0]
+    row = rail.split('data-chat=')[1]
+    # The row's own button must close before the delete button opens.
+    assert row.index("</button>") < row.index("data-del=")
+
+
+def test_a_hostile_session_name_cannot_break_out_of_the_delete_control(js):
+    sessions = [{"name": '"><script>alert(1)</script>', "cwd": "/tmp"}]
+    out = js.ctx.eval(f"chatRail({json.dumps(sessions)}, '')")
+    assert "<script>" not in out
+
+
+def test_removing_a_session_says_the_conversation_is_kept():
+    """`delete` reads as destructive. This one is not, and the prompt says so
+    rather than leaving the operator to find out."""
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    body = app.split("async function deleteSession(")[1].split("\nasync function ")[0]
+    assert "Remove" in body and "stays on disk" in body
+    assert "linked again" in body
+
+
+def test_clicking_the_delete_control_does_not_also_select_the_row():
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    handler = app.split("$('#rail-list').addEventListener")[1].split("});")[0]
+    # The delete branch returns before the select branch is reached.
+    assert handler.index("data-del") < handler.index("data-chat")
+    assert "return;" in handler

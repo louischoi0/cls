@@ -576,16 +576,28 @@ async function adoptSession(sessionId, cwd) {
   await selectSession(made.name);
 }
 
-async function deleteSession() {
-  const session = current();
-  if (!session) return;
-  if (!confirm(`Delete ${session.name} and everything it said? This cannot be undone.`)) return;
+/** Remove a session from the console. Web-side only.
+ *
+ * The server releases the 1:1 binding and drops the transcript this page
+ * replays; the Claude Code conversation stays on disk, keeps its memory, and
+ * can be linked again from the `+` panel. Saying that in the prompt matters —
+ * "delete" reads as destructive, and here it is not.
+ */
+async function deleteSession(name) {
+  const target = name || (current() && current().name);
+  if (!target) return;
+  const found = sessions.find((s) => s.name === target);
+  const kept = found && found.session_id
+    ? `\n\nIts Claude Code conversation (${found.session_id.slice(0, 8)}) stays on disk and can be linked again.`
+    : '\n\nIt has no Claude Code conversation yet, so nothing else is affected.';
+  if (!confirm(`Remove ${target} from the console?${kept}`)) return;
+
   const gone = await attempt(
-    () => api(`/sessions/${encodeURIComponent(session.name)}`, { method: 'DELETE' }),
-    { success: `${session.name} deleted` }
+    () => api(`/sessions/${encodeURIComponent(target)}`, { method: 'DELETE' }),
+    { success: `${target} removed from the console` }
   );
-  if (gone === undefined && !sessions.length) return;
-  selected = '';
+  if (gone === undefined) return;
+  if (selected === target) selected = '';
   await loadSessions();
   await loadHistory();
 }
@@ -635,6 +647,12 @@ function initChat() {
   });
 
   $('#rail-list').addEventListener('click', (e) => {
+    const remove = e.target.closest('[data-del]');
+    if (remove) {
+      e.stopPropagation();
+      deleteSession(remove.dataset.del);
+      return;
+    }
     const row = e.target.closest('[data-chat]');
     if (row) selectSession(row.dataset.chat);
   });
