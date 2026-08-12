@@ -10,11 +10,11 @@ from pathlib import Path
 import pytest
 
 from server.logstore import LogStore
-from server.models import AgentConfig, StatusStore
+from server.models import SessionConfig, StatusStore
 from server.runner import (
     AgentWorker,
     Job,
-    SessionStore,
+    SessionIds,
     _parse_result,
     build_argv,
     scrubbed_env,
@@ -30,9 +30,8 @@ def fake_claude(tmp_path: Path, body: str) -> str:
 
 @pytest.fixture
 def agent(workdir):
-    return AgentConfig(
+    return SessionConfig(
         name="alpha",
-        tags=[],
         cwd=workdir,
         system_prompt="be terse",
         allowed_tools=["Read", "Grep"],
@@ -110,7 +109,7 @@ def build_worker(tmp_path, agent, claude_bin) -> tuple[AgentWorker, StatusStore,
     worker = AgentWorker(
         agent=agent,
         queue=asyncio.Queue(),
-        sessions=SessionStore(tmp_path / "sessions.json"),
+        sessions=SessionIds(tmp_path / "sessions.json"),
         logstore=logstore,
         status=status,
         claude_bin=claude_bin,
@@ -119,7 +118,7 @@ def build_worker(tmp_path, agent, claude_bin) -> tuple[AgentWorker, StatusStore,
 
 
 def run_one(worker, status, job):
-    status.create(job.message_id, job.topic, ["alpha"], ["alpha"])
+    status.create(job.message_id, job.agent, job.text)
     asyncio.run(worker._process(job))
     return status.get(job.message_id)
 
@@ -145,7 +144,7 @@ def test_session_id_survives_a_store_reload(tmp_path, agent):
     worker, status, _ = build_worker(tmp_path, agent, binary)
     run_one(worker, status, Job("m1", "alpha", "ping", "smoke"))
 
-    assert SessionStore(tmp_path / "sessions.json").get("alpha") == "sid-keep"
+    assert SessionIds(tmp_path / "sessions.json").get("alpha") == "sid-keep"
 
 
 def test_nonzero_exit_is_recorded_as_failed(tmp_path, agent):
@@ -165,7 +164,7 @@ def test_timeout_kills_and_fails(tmp_path, agent):
     record = run_one(worker, status, Job("m1", "alpha", "ping", "smoke"))
 
     assert record.status == "failed"
-    assert "timed out" in record.target("alpha").error
+    assert "timed out" in record.error
 
 
 def test_missing_binary_fails_without_killing_the_worker(tmp_path, agent):
@@ -203,7 +202,7 @@ def test_worker_loop_processes_messages_in_order(tmp_path, agent):
         task = asyncio.create_task(worker.run())
         for i in range(3):
             job = Job(f"m{i}", "alpha", f"msg-{i}", "order")
-            status.create(job.message_id, job.topic, ["alpha"], ["alpha"])
+            status.create(job.message_id, job.agent, job.text)
             await worker.queue.put(job)
         await worker.queue.join()
         task.cancel()

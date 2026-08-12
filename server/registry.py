@@ -1,113 +1,53 @@
-"""Loading and validation of agents.yaml.
+"""The live set of sessions, indexed by name.
 
-Every problem here aborts startup. A registry that is wrong in a way we only
-notice at dispatch time is worse than a server that refuses to boot.
+This used to load `agents.yaml` at startup and abort the boot on anything wrong
+with it. Sessions are created and deleted at runtime now, so there is no file to
+validate and nothing here can refuse to start — the store is the record, and
+this is the in-memory index the dispatcher and the pool share with it.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import yaml
-from pydantic import ValidationError
-
-from .models import AgentConfig
+from .models import SessionConfig
 
 
 class RegistryError(Exception):
-    """agents.yaml is missing, malformed, or internally inconsistent."""
+    """A name that is taken, or one that is not there at all."""
 
 
 class Registry:
-    def __init__(self, agents: list[AgentConfig]) -> None:
-        if not agents:
-            raise RegistryError("agents.yaml defines no agents")
+    def __init__(self, sessions: list[SessionConfig] | None = None) -> None:
+        self.by_name: dict[str, SessionConfig] = {}
+        for session in sessions or []:
+            self.add(session)
 
-        self.by_name: dict[str, AgentConfig] = {}
-        for agent in agents:
-            if agent.name in self.by_name:
-                raise RegistryError(f"duplicate agent name {agent.name!r}")
-            self.by_name[agent.name] = agent
+    def add(self, session: SessionConfig) -> None:
+        if session.name in self.by_name:
+            raise RegistryError(f"duplicate session name {session.name!r}")
+        self.by_name[session.name] = session
 
-        # tag -> agent names, including each agent's own name as an implicit tag
-        self._by_tag: dict[str, list[str]] = {}
-        for agent in agents:
-            for tag in [agent.name, *agent.tags]:
-                self._by_tag.setdefault(tag, []).append(agent.name)
-
-    def add(self, agent: AgentConfig, extra_tags: list[str] | None = None) -> None:
-        """Register an agent after startup (project agents, docs/PROJECTS.md FR-P2).
-
-        `extra_tags` carries tags the AgentConfig validator refuses because they
-        are dispatcher-reserved — `project:<id>` is minted here, not claimed by
-        a config file, so it is safe at this level.
-        """
-        if agent.name in self.by_name:
-            raise RegistryError(f"duplicate agent name {agent.name!r}")
-        self.by_name[agent.name] = agent
-        for tag in [agent.name, *agent.tags, *(extra_tags or [])]:
-            names = self._by_tag.setdefault(tag, [])
-            if agent.name not in names:
-                names.append(agent.name)
-
-    def replace(self, agent: AgentConfig) -> None:
-        """Swap one agent's configuration for a new one.
-
-        Only settings change — the name and tags are the same, so the tag index
-        it is filed under does not move.
-        """
-        if agent.name not in self.by_name:
-            raise RegistryError(f"unknown agent {agent.name!r}")
-        self.by_name[agent.name] = agent
+    def replace(self, session: SessionConfig) -> None:
+        """Swap one session's settings. The name is the identity and cannot move."""
+        if session.name not in self.by_name:
+            raise RegistryError(f"unknown session {session.name!r}")
+        self.by_name[session.name] = session
 
     def remove(self, name: str) -> None:
         if self.by_name.pop(name, None) is None:
-            raise RegistryError(f"unknown agent {name!r}")
-        for tag, names in list(self._by_tag.items()):
-            if name in names:
-                names.remove(name)
-            if not names:
-                del self._by_tag[tag]
+            raise RegistryError(f"unknown session {name!r}")
+
+    def get(self, name: str) -> SessionConfig | None:
+        return self.by_name.get(name)
+
+    def all_agents(self) -> list[SessionConfig]:
+        return list(self.by_name.values())
 
     @property
     def names(self) -> list[str]:
         return list(self.by_name)
 
-    def all_agents(self) -> list[AgentConfig]:
-        return list(self.by_name.values())
+    def __contains__(self, name: object) -> bool:
+        return name in self.by_name
 
-    def match_tag(self, tag: str) -> list[str]:
-        """Agent names whose name or tag list contains `tag`."""
-        return list(self._by_tag.get(tag, ()))
-
-
-def load_registry(path: Path) -> Registry:
-    if not path.is_file():
-        raise RegistryError(f"agents file not found: {path}")
-
-    try:
-        raw = yaml.safe_load(path.read_text()) or {}
-    except yaml.YAMLError as exc:
-        raise RegistryError(f"{path}: invalid YAML: {exc}") from exc
-
-    if not isinstance(raw, dict) or "agents" not in raw:
-        raise RegistryError(f"{path}: expected a top-level 'agents:' list")
-    entries = raw["agents"]
-    if not isinstance(entries, list):
-        raise RegistryError(f"{path}: 'agents' must be a list")
-
-    agents: list[AgentConfig] = []
-    for i, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            raise RegistryError(f"{path}: agents[{i}] must be a mapping")
-        try:
-            agent = AgentConfig(**entry)
-        except ValidationError as exc:
-            raise RegistryError(f"{path}: agents[{i}] invalid: {exc}") from exc
-        if not agent.cwd.is_dir():
-            raise RegistryError(
-                f"{path}: agent {agent.name!r} cwd does not exist: {agent.cwd}"
-            )
-        agents.append(agent)
-
-    return Registry(agents)
+    def __len__(self) -> int:
+        return len(self.by_name)

@@ -313,259 +313,6 @@ dialog input { margin-bottom: 16px; }
 .welcome h1 { font-size: 26px; }
 .welcome .subtitle { font-size: 15px; line-height: 1.6; }
 
-/* --- stat tiles --- */
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 20px; }
-.tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
-.tile-value { font-family: var(--mono); font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
-.tile-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-faint); margin-top: 2px; }
-/* A tile that counts rows is a link to those rows. */
-.tile.link { display: block; text-decoration: none; color: inherit; }
-.tile.link:hover { border-color: var(--accent); }
-
-/* Status filters at the top of a work page. */
-.chips { margin: -4px 0 14px; }
-.chips .tag { padding: 3px 10px; text-decoration: none; }
-.chips .tag:hover { border-color: var(--accent); }
-.chips .tag.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-
-.tile.bad .tile-value { color: var(--failed); }
-.tile.busy .tile-value { color: var(--running); }
-.tile.done .tile-value { color: var(--done); }
-
-/* --- roadmap: milestone -> tasks -> issues ---
- *
- * A roadmap is scanned, not read. The rail down the left carries the status as
- * colour, so a column of these answers "where is this project" before anyone
- * parses a single badge.
- */
-.milestone {
-  position: relative; overflow: hidden;
-  border: 1px solid var(--line); border-radius: var(--radius);
-  margin-bottom: 12px; background: var(--panel);
-  transition: border-color 150ms, box-shadow 150ms, transform 150ms;
-}
-.milestone::before {
-  content: ''; position: absolute; inset: 0 auto 0 0; width: 4px;
-  background: var(--queued);
-}
-.milestone[data-status="active"]::before    { background: var(--running); }
-.milestone[data-status="done"]::before      { background: var(--done); }
-.milestone[data-status="abandoned"]::before { background: var(--cancelled); }
-.milestone[data-status="unassigned"]::before {
-  background: repeating-linear-gradient(
-    135deg, var(--line), var(--line) 3px, transparent 3px, transparent 6px);
-}
-.milestone:hover {
-  border-color: var(--ink-faint);
-  box-shadow: 0 2px 10px rgb(0 0 0 / 0.07);
-  transform: translateY(-1px);
-}
-.milestone.open {
-  border-color: var(--accent);
-  box-shadow: 0 2px 14px rgb(0 0 0 / 0.09);
-  transform: none;
-}
-
-.milestone-head { padding: 14px 16px 12px 20px; cursor: pointer; }
-.milestone-head:hover { background: var(--panel-2); }
-.milestone-title-row { align-items: flex-start; gap: 12px; }
-.milestone-title {
-  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0;
-}
-.milestone-title strong { font-size: 15px; letter-spacing: -0.01em; line-height: 1.35; }
-.milestone[data-status="done"] .milestone-title strong { color: var(--ink-soft); }
-.milestone[data-status="abandoned"] .milestone-title strong {
-  color: var(--ink-faint); text-decoration: line-through;
-}
-.caret { display: inline-block; width: 14px; color: var(--ink-faint); flex: none; }
-
-.milestone-progress { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
-.milestone-progress .meter { flex: 1; margin-top: 0; }
-.milestone-count { font-size: 12px; flex: none; white-space: nowrap; }
-.milestone-count strong { font-size: 13px; }
-
-.milestone-meta {
-  display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; margin-top: 8px;
-  color: var(--ink-faint); align-items: center;
-}
-.milestone-meta .m-open { color: var(--running); }
-.milestone-meta .m-backlog { color: var(--ink-soft); }
-.milestone-body {
-  padding: 12px 16px 14px 20px; border-top: 1px solid var(--line);
-  background: var(--panel-2);
-}
-.milestone-brief { margin: 0 0 10px; }
-
-.meter { height: 6px; border-radius: 999px; background: var(--panel-2); margin-top: 8px; overflow: hidden; }
-.milestone .meter { background: var(--line); }
-.meter-fill { height: 100%; border-radius: 999px; background: var(--done); transition: width 250ms; }
-.meter-fill.blocked { background: var(--failed); }
-
-.node { margin-top: 8px; }
-.node-row {
-  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
-  border-radius: var(--radius); font-size: 13px;
-}
-.node-row:hover { background: var(--panel-2); }
-.node-row.issue { margin-left: 22px; border-left: 2px solid var(--line); }
-.node-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* --- the command line --- */
-.console { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; font-family: var(--mono); font-size: 13px; }
-.console-out { max-height: 260px; overflow-y: auto; }
-.console-out:not(:empty) { margin-bottom: 8px; }
-.console-echo { white-space: pre-wrap; word-break: break-word; line-height: 1.5; color: var(--ink-soft); }
-.console-echo.ok { color: var(--done); }
-.console-echo.bad { color: var(--failed); }
-.console-line { display: flex; align-items: center; gap: 8px; }
-.prompt { color: var(--accent); font-weight: 700; }
-#cmd { border: none; background: none; padding: 0; font-family: var(--mono); font-size: 13px; flex: 1; }
-#cmd:focus { outline: none; }
-.console-hint { font-size: 12px; margin-top: 8px; line-height: 1.5; }
-kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
-
-.activity {
-  display: inline-block; padding: 2px 9px; border-radius: 999px;
-  font-family: var(--mono); font-size: 11px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.03em;
-  border: 1px solid currentColor; color: var(--ink-faint);
-}
-.activity.live { color: var(--running); }
-.activity.live::before {
-  content: '●'; margin-right: 5px; font-size: 9px;
-  animation: blink 1.2s ease-in-out infinite;
-}
-.activity.planning { color: var(--accent); }
-.activity.reviewing { color: #a06cc3; }
-.activity.testing { color: #c39a4a; }
-.activity.coding { color: var(--running); }
-.activity.researching { color: #4aa3c3; }
-.activity.writing { color: #c37a9a; }
-
-.warn-box {
-  border-left: 3px solid var(--failed); background: var(--panel-2);
-  border-radius: var(--radius); padding: 10px 14px; margin-top: 14px;
-  font-size: 13px; line-height: 1.55; color: var(--ink-soft);
-}
-.ok { color: var(--done); }
-
-tbody tr.selected { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
-#agent-detail dl { grid-template-columns: max-content 1fr; }
-
-/* --- "how it is configured" --- */
-.cfg {
-  display: grid; gap: 12px; margin-top: 10px;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-}
-.cfg-group {
-  border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 12px 14px; background: var(--panel-2);
-}
-.cfg-group.watch { border-color: var(--failed); }
-.cfg-group-title {
-  font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em;
-  color: var(--ink-faint); font-weight: 700; margin-bottom: 10px;
-}
-.cfg-field { display: flex; gap: 10px; align-items: baseline; margin-bottom: 7px; }
-.cfg-field:last-child { margin-bottom: 0; }
-.cfg-label {
-  flex: 0 0 74px; font-size: 12px; color: var(--ink-faint);
-}
-.cfg-value {
-  flex: 1; min-width: 0; font-size: 13px; word-break: break-word;
-}
-.cfg-value.warn { color: var(--failed); }
-.cfg-flag {
-  display: inline-block; padding: 1px 7px; border-radius: 4px;
-  background: var(--failed); color: #fff; font-size: 11px; font-weight: 600;
-  font-family: var(--mono);
-}
-.cfg-tools { display: flex; flex-wrap: wrap; gap: 3px; }
-.cfg-tools .tag.risky { border-color: var(--failed); color: var(--failed); }
-.cfg-instructions {
-  margin-top: 12px; border: 1px solid var(--line);
-  border-radius: var(--radius); padding: 12px 14px;
-}
-.cfg-instructions .md { border: none; background: none; padding: 0; }
-.cfg-instructions .md :first-child { margin-top: 0; }
-
-/* The writer sees what the reader will: the same Markdown, rendered. */
-.prompt-preview {
-  min-height: 60px; border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 8px 12px; background: var(--panel-2);
-}
-.prompt-preview :first-child { margin-top: 0; }
-.prompt-preview :last-child { margin-bottom: 0; }
-
-/* The `@name` button that puts an agent on the command line. Its selector had
-   been lost, which left the declarations orphaned and the buttons unstyled. */
-.mention-btn {
-  background: none; border: none; padding: 0; font: inherit;
-  font-family: var(--mono); color: var(--accent); cursor: pointer;
-}
-.mention-btn:hover { text-decoration: underline; }
-
-/* --- terminal: sessions listed by the work they are doing --- */
-.subject { display: flex; align-items: baseline; gap: 7px; }
-.submark {
-  flex: none; width: 16px; height: 16px; border-radius: 4px;
-  font-size: 10px; font-weight: 700; font-family: var(--mono);
-  display: inline-flex; align-items: center; justify-content: center;
-  background: var(--panel-2); color: var(--ink-faint); border: 1px solid var(--line);
-}
-.submark.task  { color: var(--running); border-color: var(--running); }
-.submark.issue { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
-/* A session waiting on a person is the one thing on this page you must act on. */
-tr.waiting > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
-
-/* A session id: short enough to scan, whole on the tooltip and the clipboard. */
-.session-cell { white-space: nowrap; }
-.session-id {
-  background: none; border: 1px dashed var(--line); border-radius: 4px;
-  padding: 1px 6px; font: inherit; font-family: var(--mono); font-size: 11px;
-  color: var(--ink-soft); cursor: pointer;
-}
-.session-id:hover { border-style: solid; border-color: var(--accent); color: var(--accent); }
-.running-now { border-left: 3px solid var(--running); padding-left: 12px; }
-
-.cmd-history { margin-top: 10px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
-.cmd-history-label {
-  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
-  margin-bottom: 2px;
-}
-.cmd-history-line {
-  background: none; border: none; padding: 2px 6px; margin: 0;
-  border-radius: 4px; font-size: 12.5px; color: var(--ink-soft);
-  cursor: pointer; text-align: left; max-width: 100%;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.cmd-history-line:hover { background: var(--panel-2); color: var(--ink); }
-.cmd-history-line::before { content: '↩ '; color: var(--ink-faint); }
-
-/* --- agent definition rows --- */
-.agent-def { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; background: var(--panel-2); }
-.switch { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-soft); cursor: pointer; white-space: nowrap; }
-.switch input { width: auto; }
-
-.badge.planned { color: var(--queued); }
-.badge.active { color: var(--running); }
-.badge.done { color: var(--done); }
-.badge.abandoned { color: var(--ink-faint); }
-.badge.milestone { color: var(--accent); }
-
-/* --- integrated search --- */
-.hit {
-  display: block; text-decoration: none; padding: 12px 14px;
-  border: 1px solid var(--line); border-radius: var(--radius);
-  margin-bottom: 8px; background: var(--panel);
-}
-.hit:hover { border-color: var(--accent); }
-.hit-snippet { margin: 6px 0; font-size: 12.5px; line-height: 1.5; }
-.hit-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
-.badge.task { color: var(--running); }
-.badge.issue { color: var(--failed); }
-.badge.log { color: var(--ink-faint); }
-
 /* --- rendered markdown --- */
 .md {
   border: 1px solid var(--line); border-radius: var(--radius);
@@ -648,4 +395,158 @@ code { font-family: var(--mono); font-size: 0.92em; background: var(--panel-2); 
   color: var(--failed);
   font-size: 13px;
   line-height: 1.5;
+}
+
+/* --- the chat -------------------------------------------------------------
+   Two columns: the sessions, and the one conversation. The page itself never
+   scrolls — the rail and the transcript scroll independently, so the composer
+   stays put while a long reply arrives. */
+
+.chat {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 0;
+  height: calc(100vh - 53px);
+  min-height: 0;
+}
+
+.chat-rail {
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  overflow-y: auto;
+  padding: 10px;
+  min-height: 0;
+}
+
+.chat-rail-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 2px 4px 10px;
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
+}
+
+.chat-rail-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.chat-rail-row:hover { background: var(--panel-2); }
+.chat-rail-row.on { background: var(--panel-2); border-color: var(--line); }
+.chat-rail-name { font-weight: 600; color: var(--ink); }
+.chat-rail-sub { grid-column: 1; font-size: 12px; }
+.chat-rail-row .dot { grid-row: 1 / span 2; align-self: center; }
+
+.dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ink-faint); display: inline-block;
+}
+.dot.busy { background: var(--running); animation: blink 1s ease-in-out infinite; }
+
+.chat-main { display: flex; flex-direction: column; min-height: 0; }
+
+.chat-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.chat-head h2 { margin: 0; font-size: 16px; }
+.chat-head-sub { margin: 2px 0 0; }
+.chat-head-actions { display: flex; align-items: center; gap: 8px; }
+button.danger:hover:not(:disabled) { border-color: var(--failed); color: var(--failed); }
+
+.chat-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.chat-msg { max-width: min(74ch, 88%); }
+.chat-msg.mine { align-self: flex-end; }
+.chat-msg.theirs { align-self: flex-start; }
+
+.chat-who {
+  display: flex; gap: 8px; align-items: baseline;
+  font-size: 12px; color: var(--ink-faint); margin-bottom: 4px;
+}
+.chat-msg.mine .chat-who { justify-content: flex-end; }
+
+.chat-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  line-height: 1.6;
+}
+.chat-msg.mine .chat-text {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+.chat-msg.failed .chat-text { border-color: var(--failed); color: var(--failed); }
+.chat-text.caret { color: var(--ink-faint); animation: blink 1s ease-in-out infinite; }
+
+.chat-activity {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+.chat-activity summary { cursor: pointer; padding: 2px 0; }
+.chat-act { display: flex; gap: 8px; padding: 1px 0 1px 10px; }
+.chat-act .smark { width: 1em; text-align: center; }
+.chat-act .stext { white-space: pre-wrap; word-break: break-word; }
+.chat-act.result { color: var(--done); }
+
+.composer {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  padding: 12px 18px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 10px;
+  align-items: end;
+}
+.composer textarea {
+  min-height: 0;
+  resize: none;
+  font-family: inherit;
+  font-size: 15px;
+  max-height: 200px;
+}
+.chat-hint { grid-column: 1 / -1; font-size: 12px; }
+
+/* The create-a-session form, inline in the rail rather than in a dialog: it is
+   short, and it belongs beside the list it adds to. */
+.session-form {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.session-form label { display: grid; gap: 3px; font-size: 12px; color: var(--ink-soft); }
+.session-form input, .session-form textarea { font-size: 13px; }
+.session-form textarea { min-height: 0; }
+.session-form .wide { grid-column: 1 / -1; }
+
+@media (max-width: 720px) {
+  .chat { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .chat-rail { max-height: 34vh; border-right: none; border-bottom: 1px solid var(--line); }
 }

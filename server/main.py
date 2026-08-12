@@ -1,4 +1,23 @@
-"""FastAPI app: auth, routes, and the worker lifecycle."""
+"""FastAPI app: auth, the session routes, and the worker lifecycle.
+
+The shape of the whole thing:
+
+    Browser / client
+        │  X-API-Key, or a sealed envelope (server/sealed.py)
+        ▼
+    API (this module)
+        ├── SessionStore   — sessions and transcripts, one SQLite file
+        ├── Registry       — the live sessions, by name
+        ├── Dispatcher     — one FIFO queue per session
+        ├── AgentPool      — one serial worker per session
+        │       └── subprocess: claude -p --resume <session_id>
+        ├── StreamHub      — a run's output, live, to whoever is watching
+        ├── LogStore       — logs/{YYYY-MM-DD}/{session}.md
+        └── Console        — static files at /web/
+
+One session is one Claude Code conversation. Turns are serialised per session,
+because two `claude --resume` processes on one session id would corrupt it.
+"""
 
 from __future__ import annotations
 
@@ -39,57 +58,26 @@ class ConsoleFiles(StaticFiles):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
 
-from .dispatcher import DispatchError, Dispatcher, resolve_targets
-from .logstore import LogStore, LogStoreError, slugify, validate_date
+from .dispatcher import Dispatcher
+from .logstore import LogStore, LogStoreError
 from .models import (
-    AgentInfo,
-    AgentState,
-    IssueCreate,
-    IssueRecord,
-    IssueResolve,
-    MessageAccepted,
-    MessageRequest,
-    MessageStatusResponse,
-    MilestoneCreate,
-    MilestoneImportRequest,
-    MilestoneImportResult,
-    MilestoneRecord,
-    MilestoneUpdate,
-    OverviewSyncRequest,
-    OverviewSyncResult,
-    PlanRequest,
-    PlanResult,
-    ProjectAgentCreate,
-    ProjectAgentRecord,
-    ProjectAgentUpdate,
-    ProjectCreate,
-    ProjectInfo,
-    ProjectInsight,
-    ProjectSettings,
-    ProjectSettingsUpdate,
-    ProjectUpdate,
-    SearchHit,
+    ChatAccepted,
+    ChatRequest,
+    MessageRecord,
+    SessionConfig,
+    SessionCreate,
+    SessionInfo,
+    SessionUpdate,
     StatusStore,
-    TaskAssign,
-    TaskCreate,
-    TaskRecord,
+    Turn,
 )
-from .planner import run_plan
-from .search import SEARCH_TYPES, search
 from .pool import AgentPool
-from .projects import ProjectError, ProjectService
-from .registry import Registry, load_registry
-from .runner import AgentWorker, Job, SessionStore, resolve_claude_bin
+from .registry import Registry, RegistryError
+from .runner import AgentWorker, Job, SessionIds, resolve_claude_bin
 from .sealed import AUTH_HEADER, SEALED_HEADER, SealError, SealedSession
-from .store import ProjectStore, open_store
+from .sessions import SessionStore, SessionStoreError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-#: What the deployed server stores projects in. SQLite for now — the KDS
-#: backend is built and passes the same contract suite, but it needs a second
-#: process running, so it stays opt-in until it is wanted:
-#:   CC_AUTOMATION_STORE='kds://127.0.0.1:15432?fallback=sqlite'
-DEFAULT_STORE_URL = "sqlite://"
 
 UNAUTHENTICATED_PATHS = frozenset({"/health", "/"})
 # The console's own HTML/CSS/JS. A browser cannot put a header on a navigation,
@@ -100,6 +88,9 @@ UNAUTHENTICATED_PREFIXES = ("/web/",)
 #: How long a quiet stream waits before sending a comment, so an idle proxy
 #: does not decide the connection is dead.
 HEARTBEAT_S = 15.0
+
+#: Turns handed back by `GET /sessions/{name}/history` unless asked otherwise.
+HISTORY_LIMIT = 200
 
 log = logging.getLogger("cc_automation")
 
@@ -112,7 +103,7 @@ class JsonLineFormatter(logging.Formatter):
             "logger": record.name,
             "msg": record.getMessage(),
         }
-        for key in ("message_id", "agent"):
+        for key in ("message_id", "session"):
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value
@@ -132,7 +123,6 @@ def configure_logging(level: str = "INFO") -> None:
 @dataclass
 class Config:
     home: Path = PROJECT_ROOT
-    agents_file: Path | None = None
     logs_dir: Path | None = None
     state_dir: Path | None = None
     api_key: str | None = None
@@ -141,8 +131,8 @@ class Config:
     start_workers: bool = True
     #: the console's static files; they ship with the code, not with `home`
     web_dir: Path | None = None
-    #: `sqlite://<path>` or `kds://host:port[?fallback=sqlite]`
-    store_url: str | None = None
+    #: the SQLite file holding sessions and their transcripts
+    db_path: Path | None = None
     #: Refuse plaintext API calls, so the key cannot reach the wire by accident.
     #: Off by default: it breaks every `curl -H 'X-API-Key: ...'` in the docs,
     #: and on loopback there is nothing to protect against. Turn it on with the
@@ -151,27 +141,24 @@ class Config:
 
     def __post_init__(self) -> None:
         self.home = Path(self.home).expanduser()
-        self.agents_file = Path(self.agents_file or self.home / "agents.yaml").expanduser()
         self.logs_dir = Path(self.logs_dir or self.home / "logs").expanduser()
         self.state_dir = Path(self.state_dir or self.home / "state").expanduser()
         self.api_key_file = Path(self.api_key_file).expanduser()
         self.web_dir = Path(self.web_dir or PROJECT_ROOT / "web").expanduser()
-        if self.store_url is None:
-            self.store_url = f"sqlite://{self.state_dir / 'projects.db'}"
+        self.db_path = Path(self.db_path or self.state_dir / "chat.db").expanduser()
 
     @classmethod
     def from_env(cls) -> "Config":
         env = os.environ.get
         return cls(
             home=Path(env("CC_AUTOMATION_HOME", str(PROJECT_ROOT))),
-            agents_file=Path(env("CC_AUTOMATION_AGENTS_FILE")) if env("CC_AUTOMATION_AGENTS_FILE") else None,
             logs_dir=Path(env("CC_AUTOMATION_LOGS_DIR")) if env("CC_AUTOMATION_LOGS_DIR") else None,
             state_dir=Path(env("CC_AUTOMATION_STATE_DIR")) if env("CC_AUTOMATION_STATE_DIR") else None,
             api_key=env("CC_AUTOMATION_API_KEY"),
             api_key_file=Path(env("CC_AUTOMATION_API_KEY_FILE", "~/.cc-automation/api_key")),
             claude_bin=env("CC_AUTOMATION_CLAUDE_BIN"),
             web_dir=Path(env("CC_AUTOMATION_WEB_DIR")) if env("CC_AUTOMATION_WEB_DIR") else None,
-            store_url=env("CC_AUTOMATION_STORE", DEFAULT_STORE_URL),
+            db_path=Path(env("CC_AUTOMATION_DB")) if env("CC_AUTOMATION_DB") else None,
             require_sealed=env("CC_AUTOMATION_REQUIRE_SEALED", "").lower()
             in ("1", "true", "yes", "on"),
         )
@@ -189,24 +176,69 @@ class Config:
         )
 
 
+class Transcript:
+    """The pool's observer: it writes each reply into the session's transcript.
+
+    The worker already knows how a run went — this turns that into the `agent`
+    turn the console replays after a reload. It is the observer rather than the
+    route because a run outlives the request that queued it.
+    """
+
+    def __init__(self, store: SessionStore) -> None:
+        self.store = store
+
+    async def job_started(self, job: Job) -> bool:
+        return True
+
+    async def job_finished(self, job: Job, result) -> None:
+        text = result.result_text or ("(no reply)" if result.ok else "run failed")
+        if result.session_was_reset:
+            text = "_(previous session could not be resumed; started a new one)_\n\n" + text
+        self.store.add_turn(
+            job.agent, "agent", text, message_id=job.message_id, failed=not result.ok
+        )
+
+    def worker_idle(self, agent: str) -> None:
+        return None
+
+
 @dataclass
 class AppState:
     config: Config
     api_key: str
     registry: Registry
     dispatcher: Dispatcher
-    sessions: SessionStore
+    session_ids: SessionIds
     logstore: LogStore
     status: StatusStore
-    store: ProjectStore
+    store: SessionStore
     #: The transport key derived from `api_key`, plus its replay guard.
     sealed: SealedSession = None  # type: ignore[assignment]
     pool: AgentPool = None  # type: ignore[assignment]
-    projects: ProjectService = None  # type: ignore[assignment]
 
     @property
     def workers(self) -> dict[str, AgentWorker]:
         return self.pool.workers
+
+    def info(self, config: SessionConfig, counts: dict) -> SessionInfo:
+        turns, last_at = counts.get(config.name, (0, None))
+        worker = self.workers.get(config.name)
+        return SessionInfo(
+            name=config.name,
+            cwd=str(config.cwd),
+            system_prompt=config.system_prompt,
+            allowed_tools=config.allowed_tools,
+            permission_mode=config.permission_mode,
+            model=config.model,
+            max_budget_usd=config.max_budget_usd,
+            timeout_s=config.timeout_s,
+            created_at=config.created_at,
+            session_id=self.session_ids.get(config.name),
+            queue_depth=self.dispatcher.depth(config.name),
+            busy=bool(worker and worker.busy),
+            turns=turns,
+            last_at=last_at,
+        )
 
 
 #: Content type of a sealed body, in both directions.
@@ -219,9 +251,9 @@ SEALED_TYPE_HEADER = "X-CC-Type"
 def _full_path(request: Request) -> str:
     """Path and query as the claims sign it.
 
-    The query string is half the request on routes like `/tasks?status=failed`,
-    so it is signed too — otherwise a captured envelope could be re-pointed at a
-    different filter.
+    The query string is half the request on routes like `?limit=50`, so it is
+    signed too — otherwise a captured envelope could be re-pointed at a
+    different slice.
     """
     query = request.url.query
     return f"{request.url.path}?{query}" if query else request.url.path
@@ -317,22 +349,19 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Everything that can be wrong with the configuration is discovered
-        # here, before the first request is served.
-        registry = load_registry(config.agents_file)
         api_key = config.resolve_api_key()
+        store = SessionStore(config.db_path)
+        registry = Registry(store.list())
         state = AppState(
             config=config,
             api_key=api_key,
             sealed=SealedSession(api_key),
             registry=registry,
-            dispatcher=Dispatcher(registry),
-            sessions=SessionStore(config.state_dir / "sessions.json"),
+            dispatcher=Dispatcher(),
+            session_ids=SessionIds(config.state_dir / "sessions.json"),
             logstore=LogStore(config.logs_dir),
             status=StatusStore(),
-            store=open_store(
-                config.store_url, sqlite_path=config.state_dir / "projects.db"
-            ),
+            store=store,
         )
         claude_bin = config.claude_bin or (
             resolve_claude_bin() if config.start_workers else "claude"
@@ -340,28 +369,23 @@ def create_app(
         state.pool = AgentPool(
             registry=registry,
             dispatcher=state.dispatcher,
-            sessions=state.sessions,
+            sessions=state.session_ids,
             logstore=state.logstore,
             status=state.status,
             claude_bin=claude_bin,
             worker_factory=worker_factory,
             start_workers=config.start_workers,
+            observer=Transcript(store),
         )
-        # The service is the pool's observer, and the pool is the service's way
-        # to add agents; the cycle is closed here rather than in either one.
-        state.projects = ProjectService(
-            state.store, state.pool, state.dispatcher, state.status
-        )
-        state.pool.observer = state.projects
-        state.pool.env_provider = state.projects.agent_env
-        for agent in registry.all_agents():
-            state.pool.start(agent)
-        await state.projects.restore()
+        # Sessions outlive the process; their workers do not. Everything the
+        # store knows about gets one back on the way up.
+        for session in registry.all_agents():
+            state.pool.start(session)
 
         app.state.cc = state
         log.info(
-            "started with agents: %s (store: %s, sealed: %s)",
-            ", ".join(registry.names), state.store.backend,
+            "started with %d session(s): %s (sealed: %s)",
+            len(registry), ", ".join(registry.names) or "none",
             "required" if config.require_sealed else "optional",
         )
         try:
@@ -370,7 +394,7 @@ def create_app(
             await state.pool.shutdown()
             state.store.close()
 
-    app = FastAPI(title="Claude Code Automation Server", version="1.0", lifespan=lifespan)
+    app = FastAPI(title="cls chat console", version="2.0", lifespan=lifespan)
 
     @app.middleware("http")
     async def require_api_key(request: Request, call_next) -> Response:
@@ -405,89 +429,132 @@ def create_app(
             return JSONResponse({"detail": "invalid or missing X-API-Key"}, status_code=401)
         return await call_next(request)
 
-    @app.get("/health")
-    async def health(request: Request) -> dict:
-        # `store` is here so a silent fallback is not silent: if kds_server was
-        # down at boot, this is where you see that sqlite took over.
-        return {"status": "ok", "store": request.app.state.cc.store.backend}
-
-    @app.exception_handler(ProjectError)
-    async def project_error(request: Request, exc: ProjectError) -> JSONResponse:
+    @app.exception_handler(SessionStoreError)
+    async def store_error(request: Request, exc: SessionStoreError) -> JSONResponse:
         return JSONResponse({"detail": exc.message}, status_code=exc.status_code)
 
-    @app.get("/agents", response_model=list[AgentInfo])
-    async def list_agents(request: Request) -> list[AgentInfo]:
-        st: AppState = request.app.state.cc
-        owned = {a.runtime_name: a for a in st.store.list_agents()}
-        infos = []
-        for agent in st.registry.all_agents():
-            # One call per agent so the list and the detail view can never
-            # disagree about what an agent is doing.
-            state = st.projects.agent_state(agent.name)
-            infos.append(AgentInfo(
-                name=agent.name,
-                tags=agent.tags,
-                cwd=str(agent.cwd),
-                session_id=st.sessions.get(agent.name),
-                queue_depth=state.queue_depth,
-                busy=state.busy,
-                project=owned[agent.name].project_id if agent.name in owned else None,
-                role=owned[agent.name].role if agent.name in owned else None,
-                activity=state.activity,
-                working_on=state.working_on,
-                model=agent.model,
-                subject=state.subject,
-                subject_kind=state.subject_kind,
-                subject_id=state.subject_id,
-                milestone=state.milestone,
-                waiting=state.waiting,
-            ))
-        return infos
+    @app.get("/health")
+    async def health() -> dict:
+        return {"status": "ok"}
 
-    @app.get("/agents/{name}", response_model=AgentState)
-    async def agent_state(request: Request, name: str) -> AgentState:
-        """One agent's current state: what it is running, and what is behind it."""
-        return request.app.state.cc.projects.agent_state(name)
+    # -- sessions -----------------------------------------------------------
 
-    @app.post("/messages", status_code=202, response_model=MessageAccepted)
-    async def post_message(request: Request, body: MessageRequest) -> MessageAccepted:
+    def _session_or_404(st: AppState, name: str) -> SessionConfig:
+        config = st.registry.get(name)
+        if config is None:
+            raise HTTPException(status_code=404, detail=f"no session {name!r}")
+        return config
+
+    @app.get("/sessions", response_model=list[SessionInfo])
+    async def list_sessions(request: Request) -> list[SessionInfo]:
         st: AppState = request.app.state.cc
-        try:
-            resolved = resolve_targets(body.tags, st.registry, st.sessions.as_dict())
-        except DispatchError as exc:
+        counts = st.store.counts()
+        return [st.info(c, counts) for c in st.registry.all_agents()]
+
+    @app.post("/sessions", response_model=SessionInfo, status_code=201)
+    async def create_session(request: Request, body: SessionCreate) -> SessionInfo:
+        st: AppState = request.app.state.cc
+        config = body.to_config()
+        if not config.cwd.is_dir():
             raise HTTPException(
-                status_code=422,
-                detail={"error": exc.message, "unmatched_tags": exc.unmatched},
-            ) from exc
-
-        message_id = uuid.uuid4().hex[:16]
-        # One topic per message; per-agent fallback would scatter a fan-out
-        # across files, so a fan-out with no topic lands under "global".
-        raw_topic = body.topic or (
-            resolved.agents[0] if len(resolved.agents) == 1 else "global"
-        )
-        try:
-            topic = slugify(raw_topic)
-        except LogStoreError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        st.status.create(message_id, topic, body.tags, resolved.agents)
-        for agent in resolved.agents:
-            await st.dispatcher.enqueue(
-                agent, Job(message_id=message_id, agent=agent, text=body.text, topic=topic)
+                status_code=400, detail=f"cwd does not exist: {config.cwd}"
             )
-        log.info(
-            "accepted message for %s", ", ".join(resolved.agents),
-            extra={"message_id": message_id},
+        # The store decides whether the name is free — it is the record, and a
+        # registry that disagreed with it would only be found on the next boot.
+        st.store.create(config)
+        try:
+            st.pool.add(config)
+        except RegistryError as exc:
+            st.store.delete(config.name)
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        log.info("created session %s", config.name, extra={"session": config.name})
+        return st.info(config, st.store.counts())
+
+    @app.get("/sessions/{name}", response_model=SessionInfo)
+    async def get_session(request: Request, name: str) -> SessionInfo:
+        st: AppState = request.app.state.cc
+        return st.info(_session_or_404(st, name), st.store.counts())
+
+    @app.patch("/sessions/{name}", response_model=SessionInfo)
+    async def update_session(request: Request, name: str, body: SessionUpdate) -> SessionInfo:
+        st: AppState = request.app.state.cc
+        current = _session_or_404(st, name)
+        changed = body.model_dump(exclude_none=True)
+        updated = SessionConfig(**{**current.model_dump(), **changed})
+        if not updated.cwd.is_dir():
+            raise HTTPException(status_code=400, detail=f"cwd does not exist: {updated.cwd}")
+        st.store.replace(updated)
+        st.pool.reconfigure(updated)
+        return st.info(updated, st.store.counts())
+
+    @app.delete("/sessions/{name}", status_code=204)
+    async def delete_session(request: Request, name: str) -> Response:
+        st: AppState = request.app.state.cc
+        _session_or_404(st, name)
+        worker = st.workers.get(name)
+        if worker is not None and worker.busy:
+            # Cancelling mid-run would abandon the `claude` subprocess rather
+            # than kill it, so the wait is deliberate; `timeout_s` is the
+            # backstop that guarantees the wait ends.
+            raise HTTPException(
+                status_code=409, detail="session is running; wait for it to finish"
+            )
+        await st.pool.remove(name)
+        st.store.delete(name)
+        log.info("deleted session %s", name, extra={"session": name})
+        return Response(status_code=204)
+
+    # -- chat ---------------------------------------------------------------
+
+    @app.get("/sessions/{name}/history", response_model=list[Turn])
+    async def history(request: Request, name: str, limit: int = HISTORY_LIMIT) -> list[Turn]:
+        st: AppState = request.app.state.cc
+        _session_or_404(st, name)
+        return st.store.history(name, limit=max(1, min(limit, 1000)))
+
+    @app.delete("/sessions/{name}/history")
+    async def clear_history(request: Request, name: str) -> dict:
+        """Forget the transcript, keeping the session.
+
+        The Claude Code conversation on the other side is untouched and still
+        remembers — this clears what the console shows, not what the model
+        knows. Deleting the session is how you start genuinely fresh.
+        """
+        st: AppState = request.app.state.cc
+        _session_or_404(st, name)
+        return {"removed": st.store.clear_history(name)}
+
+    @app.post("/sessions/{name}/messages", response_model=ChatAccepted, status_code=202)
+    async def say(request: Request, name: str, body: ChatRequest) -> ChatAccepted:
+        """Queue one turn. The reply arrives on the stream and in the history."""
+        st: AppState = request.app.state.cc
+        _session_or_404(st, name)
+        message_id = uuid.uuid4().hex[:16]
+        st.store.add_turn(name, "user", body.text, message_id=message_id)
+        st.status.create(message_id, name, body.text)
+        await st.dispatcher.send(
+            name, Job(message_id=message_id, agent=name, text=body.text, topic=name)
         )
-        return MessageAccepted(message_id=message_id, targets=resolved.agents, topic=topic)
+        log.info(
+            "queued a turn for %s", name,
+            extra={"message_id": message_id, "session": name},
+        )
+        return ChatAccepted(message_id=message_id, session=name)
+
+    @app.get("/messages/{message_id}", response_model=MessageRecord)
+    async def message_status(request: Request, message_id: str) -> MessageRecord:
+        st: AppState = request.app.state.cc
+        record = st.status.get(message_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="unknown message id")
+        return record
 
     @app.get("/messages/{message_id}/stream")
     async def stream_message(request: Request, message_id: str) -> StreamingResponse:
-        """Server-sent events: what this run is doing, as it does it.
+        """Server-sent events: what this turn is doing, as it does it.
 
         History first, then the live feed, then `event: end`. A run that has
-        already finished replays what it kept and ends, so opening a task while
+        already finished replays what it kept and ends, so opening a turn while
         it runs and opening it afterwards differ only in the scrollback.
 
         The API key rides on the request header like every other route, which is
@@ -529,395 +596,50 @@ def create_app(
         return StreamingResponse(
             events(),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",  # nginx must not sit on the events
-            },
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.get("/messages/{message_id}", response_model=MessageStatusResponse)
-    async def get_message(request: Request, message_id: str) -> MessageStatusResponse:
-        record = request.app.state.cc.status.get(message_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="unknown message_id")
-        return MessageStatusResponse.of(record)
+    # -- logs ---------------------------------------------------------------
 
     @app.get("/logs")
-    async def get_log_dates(request: Request) -> dict:
-        return {"dates": request.app.state.cc.logstore.list_dates()}
+    async def list_log_dates(request: Request) -> list[str]:
+        return request.app.state.cc.logstore.list_dates()
 
     @app.get("/logs/{date}")
-    async def get_log_topics(request: Request, date: str) -> dict:
-        st: AppState = request.app.state.cc
+    async def list_log_topics(request: Request, date: str) -> list[str]:
         try:
-            date = validate_date(date)
+            return request.app.state.cc.logstore.list_topics(date)
         except LogStoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"date": date, "topics": st.logstore.list_topics(date)}
 
     @app.get("/logs/{date}/{topic}", response_class=PlainTextResponse)
-    async def get_log(request: Request, date: str, topic: str) -> PlainTextResponse:
-        st: AppState = request.app.state.cc
+    async def read_log(request: Request, date: str, topic: str) -> str:
         try:
-            content = st.logstore.read_topic(date, topic)
+            text = request.app.state.cc.logstore.read_topic(date, topic)
         except LogStoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if content is None:
+        if text is None:
             raise HTTPException(status_code=404, detail="no log for that date and topic")
-        return PlainTextResponse(content, media_type="text/markdown; charset=utf-8")
+        return text
 
-    # -- projects (docs/PROJECTS.md) --------------------------------------- #
+    # -- the console --------------------------------------------------------
 
-    @app.post("/projects", status_code=201, response_model=ProjectInfo)
-    async def create_project(request: Request, body: ProjectCreate) -> ProjectInfo:
-        svc: ProjectService = request.app.state.cc.projects
-        project = svc.create_project(body)
-        # The manager first, then the workers, in the order they were given.
-        # Any of them failing unwinds the whole project: half a roster is not
-        # the project that was asked for.
-        planned = []
-        if body.manager is not None:
-            planned.append(body.manager.model_copy(update={"role": "manager"}))
-        planned.extend(a.model_copy(update={"role": "worker"}) for a in body.agents)
-        for spec in planned:
-            try:
-                svc.add_agent(project, spec)
-            except ProjectError:
-                await svc.delete_project(project)
-                raise
-        # Seed the brief from the repository's README, best effort: GitHub being
-        # unreachable is not a reason to refuse a project that is otherwise fine.
-        try:
-            await svc.sync_overview(project)
-        except ProjectError as exc:
-            log.warning("project %s: could not seed overview.md: %s", project.id, exc.message)
-
-        info = svc.describe(project)
-        if body.import_milestones:
-            # Also best effort, and reported rather than silent: a missing docs/
-            # should not undo a project that is otherwise exactly right.
-            try:
-                info.imported = svc.import_milestones(project, body.import_paths)
-                info = svc.describe(project).model_copy(
-                    update={"imported": info.imported}
-                )
-            except ProjectError as exc:
-                info.imported = MilestoneImportResult(
-                    project_id=project.id, detail=f"nothing imported: {exc.message}"
-                )
-        return info
-
-    @app.patch("/projects/{pid}", response_model=ProjectInfo)
-    async def update_project(request: Request, pid: str, body: ProjectUpdate) -> ProjectInfo:
-        svc: ProjectService = request.app.state.cc.projects
-        project = svc.require_project(pid)
-        if body.github_url is not None:
-            project = svc.set_github(project, body.github_url)
-        if body.tool_policy is not None:
-            project = svc.set_tool_policy(project, body.tool_policy)
-        return svc.describe(project)
-
-    @app.post("/projects/{pid}/overview/sync", response_model=OverviewSyncResult)
-    async def sync_overview(
-        request: Request, pid: str, body: OverviewSyncRequest | None = None
-    ) -> OverviewSyncResult:
-        svc: ProjectService = request.app.state.cc.projects
-        return await svc.sync_overview(
-            svc.require_project(pid), overwrite=bool(body and body.overwrite)
-        )
-
-    @app.get("/projects", response_model=list[ProjectInfo])
-    async def list_projects(request: Request) -> list[ProjectInfo]:
-        svc: ProjectService = request.app.state.cc.projects
-        return [svc.describe(p) for p in svc.store.list_projects()]
-
-    @app.get("/projects/{pid}", response_model=ProjectInfo)
-    async def get_project(request: Request, pid: str) -> ProjectInfo:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.describe(svc.require_project(pid))
-
-    @app.delete("/projects/{pid}")
-    async def delete_project(request: Request, pid: str) -> dict:
-        svc: ProjectService = request.app.state.cc.projects
-        project = svc.require_project(pid)
-        await svc.delete_project(project)
-        return {"deleted": pid}
-
-    @app.get("/projects/{pid}/overview", response_class=PlainTextResponse)
-    async def get_overview(request: Request, pid: str) -> PlainTextResponse:
-        svc: ProjectService = request.app.state.cc.projects
-        content = svc.read_overview(svc.require_project(pid))
-        return PlainTextResponse(content, media_type="text/markdown; charset=utf-8")
-
-    @app.put("/projects/{pid}/overview")
-    async def put_overview(request: Request, pid: str) -> dict:
-        # Read the raw body rather than declaring a Body(str): the brief is
-        # Markdown, and FastAPI's JSON-first body handling would make the
-        # request depend on the client setting a Content-Type.
-        svc: ProjectService = request.app.state.cc.projects
-        raw = await request.body()
-        try:
-            content = raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise HTTPException(status_code=400, detail="body must be UTF-8") from exc
-        path = svc.write_overview(svc.require_project(pid), content)
-        return {"path": str(path), "bytes": len(raw)}
-
-    @app.get("/projects/{pid}/agents", response_model=list[ProjectAgentRecord])
-    async def list_project_agents(request: Request, pid: str) -> list[ProjectAgentRecord]:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.store.list_agents(svc.require_project(pid).id)
-
-    @app.post("/projects/{pid}/agents", status_code=201, response_model=ProjectAgentRecord)
-    async def add_project_agent(
-        request: Request, pid: str, body: ProjectAgentCreate
-    ) -> ProjectAgentRecord:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.add_agent(svc.require_project(pid), body)
-
-    @app.patch("/projects/{pid}/agents/{name}", response_model=ProjectAgentRecord)
-    async def update_project_agent(
-        request: Request, pid: str, name: str, body: ProjectAgentUpdate
-    ) -> ProjectAgentRecord:
-        """Change an agent's settings in place, keeping its session and queue.
-
-        Omitted fields are left alone; `""` clears `system_prompt` or `model`.
-        A run already in flight finishes on the old settings.
-        """
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.update_agent(svc.require_project(pid), name, body)
-
-    @app.delete("/projects/{pid}/agents/{name}")
-    async def delete_project_agent(request: Request, pid: str, name: str) -> dict:
-        svc: ProjectService = request.app.state.cc.projects
-        cancelled = await svc.delete_agent(svc.require_project(pid), name)
-        return {"deleted": name, "tasks_cancelled": cancelled}
-
-    @app.get("/projects/{pid}/tasks", response_model=list[TaskRecord])
-    async def list_project_tasks(
-        request: Request, pid: str, status: str | None = None,
-        branch: str | None = None, milestone_id: str | None = None,
-        limit: int = 200,
-    ) -> list[TaskRecord]:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.store.list_tasks(
-            svc.require_project(pid).id, status=status, branch=branch,
-            milestone_id=milestone_id, limit=min(limit, 1000),
-        )
-
-    @app.post("/projects/{pid}/tasks", status_code=201, response_model=TaskRecord)
-    async def create_task(request: Request, pid: str, body: TaskCreate) -> TaskRecord:
-        """Create a task. Omitting `agent` files it in the backlog instead."""
-        svc: ProjectService = request.app.state.cc.projects
-        return await svc.create_task(
-            svc.require_project(pid), body.agent, body.title, body.text,
-            created_by="api", branch=body.branch, milestone_id=body.milestone_id,
-        )
-
-    @app.post("/projects/{pid}/tasks/{tid}/assign", response_model=TaskRecord)
-    async def assign_task(
-        request: Request, pid: str, tid: str, body: TaskAssign
-    ) -> TaskRecord:
-        """Hand a backlog task to an agent, which is what queues it."""
-        svc: ProjectService = request.app.state.cc.projects
-        return await svc.assign_task(
-            svc.require_project(pid), tid, body.agent,
-            branch=body.branch, milestone_id=body.milestone_id,
-        )
-
-    @app.post("/projects/{pid}/plan", response_model=PlanResult)
-    async def plan_project(
-        request: Request, pid: str, body: PlanRequest | None = None
-    ) -> PlanResult:
-        svc: ProjectService = request.app.state.cc.projects
-        project = svc.require_project(pid)
-        return await run_plan(svc, project, body.note if body else None)
-
-    # -- milestones ---------------------------------------------------------- #
-    # milestone → tasks → issues. Only a person creates one: the plan vocabulary
-    # has no milestone verb, so an agent can fill a goal but never invent one.
-
-    @app.get("/projects/{pid}/milestones", response_model=list[MilestoneRecord])
-    async def list_milestones(
-        request: Request, pid: str, status: str | None = None
-    ) -> list[MilestoneRecord]:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.store.list_milestones(svc.require_project(pid).id, status=status)
-
-    @app.post("/projects/{pid}/milestones", status_code=201, response_model=MilestoneRecord)
-    async def create_milestone(
-        request: Request, pid: str, body: MilestoneCreate
-    ) -> MilestoneRecord:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.create_milestone(svc.require_project(pid), body)
-
-    @app.post("/projects/{pid}/milestones/import", response_model=MilestoneImportResult)
-    async def import_milestones(
-        request: Request, pid: str, body: MilestoneImportRequest | None = None
-    ) -> MilestoneImportResult:
-        """Turn design documents into milestones, backlog tasks and open issues.
-
-        Defaults to `docs/`. Imported tasks name no agent and are not queued —
-        `POST /tasks/{tid}/assign` is what starts one.
-        """
-        svc: ProjectService = request.app.state.cc.projects
-        body = body or MilestoneImportRequest()
-        return svc.import_milestones(
-            svc.require_project(pid), body.paths, dry_run=body.dry_run,
-            tasks=body.tasks, issues=body.issues,
-        )
-
-    @app.patch("/projects/{pid}/milestones/{mid}", response_model=MilestoneRecord)
-    async def update_milestone(
-        request: Request, pid: str, mid: str, body: MilestoneUpdate
-    ) -> MilestoneRecord:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.update_milestone(svc.require_project(pid), mid, body)
-
-    @app.delete("/projects/{pid}/milestones/{mid}")
-    async def delete_milestone(request: Request, pid: str, mid: str) -> dict:
-        svc: ProjectService = request.app.state.cc.projects
-        svc.delete_milestone(svc.require_project(pid), mid)
-        return {"deleted": mid}
-
-    @app.get("/projects/{pid}/settings", response_model=ProjectSettings)
-    async def project_settings(request: Request, pid: str) -> ProjectSettings:
-        """Never includes the token itself — only whether one is set."""
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.settings(svc.require_project(pid))
-
-    @app.put("/projects/{pid}/settings", response_model=ProjectSettings)
-    async def update_project_settings(
-        request: Request, pid: str, body: ProjectSettingsUpdate
-    ) -> ProjectSettings:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.update_settings(svc.require_project(pid), body)
-
-    @app.get("/projects/{pid}/insight", response_model=ProjectInsight)
-    async def project_insight(request: Request, pid: str) -> ProjectInsight:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.insight(svc.require_project(pid))
-
-    # -- issues -------------------------------------------------------------- #
-    # A task is work handed to an agent; an issue is what stops the project
-    # moving — a decision someone has to make, or a run that broke.
-
-    @app.get("/projects/{pid}/issues", response_model=list[IssueRecord])
-    async def list_project_issues(
-        request: Request, pid: str, status: str | None = None,
-        kind: str | None = None, branch: str | None = None,
-        milestone_id: str | None = None, limit: int = 200,
-    ) -> list[IssueRecord]:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.store.list_issues(
-            svc.require_project(pid).id, status=status, kind=kind, branch=branch,
-            milestone_id=milestone_id, limit=min(limit, 1000),
-        )
-
-    @app.post("/projects/{pid}/issues", status_code=201, response_model=IssueRecord)
-    async def raise_issue(request: Request, pid: str, body: IssueCreate) -> IssueRecord:
-        svc: ProjectService = request.app.state.cc.projects
-        return svc.raise_issue(svc.require_project(pid), body, created_by="api")
-
-    @app.get("/issues", response_model=list[IssueRecord])
-    async def list_issues(
-        request: Request,
-        status: str | None = None,
-        project: str | None = None,
-        kind: str | None = None,
-        agent: str | None = None,
-        branch: str | None = None,
-        limit: int = 200,
-    ) -> list[IssueRecord]:
-        st: AppState = request.app.state.cc
-        return st.store.list_issues(
-            project_id=project, status=status, kind=kind, agent=agent,
-            branch=branch, limit=min(limit, 1000),
-        )
-
-    @app.get("/issues/{iid}", response_model=IssueRecord)
-    async def get_issue(request: Request, iid: str) -> IssueRecord:
-        issue = request.app.state.cc.store.get_issue(iid)
-        if issue is None:
-            raise HTTPException(status_code=404, detail="unknown issue id")
-        return issue
-
-    @app.post("/issues/{iid}/resolve", response_model=IssueRecord)
-    async def resolve_issue(
-        request: Request, iid: str, body: IssueResolve | None = None
-    ) -> IssueRecord:
-        svc: ProjectService = request.app.state.cc.projects
-        body = body or IssueResolve()
-        return svc.close_issue(iid, body.resolution, body.dismiss)
-
-    @app.get("/tasks", response_model=list[TaskRecord])
-    async def list_tasks(
-        request: Request,
-        status: str | None = None,
-        project: str | None = None,
-        agent: str | None = None,
-        branch: str | None = None,
-        limit: int = 200,
-    ) -> list[TaskRecord]:
-        st: AppState = request.app.state.cc
-        return st.store.list_tasks(
-            project_id=project, status=status, agent=agent, branch=branch,
-            limit=min(limit, 1000),
-        )
-
-    @app.get("/tasks/{tid}", response_model=TaskRecord)
-    async def get_task(request: Request, tid: str) -> TaskRecord:
-        task = request.app.state.cc.store.get_task(tid)
-        if task is None:
-            raise HTTPException(status_code=404, detail="unknown task id")
-        return task
-
-    @app.post("/tasks/{tid}/cancel", response_model=TaskRecord)
-    async def cancel_task(request: Request, tid: str) -> TaskRecord:
-        return request.app.state.cc.projects.cancel_task(tid)
-
-    @app.get("/search", response_model=list[SearchHit])
-    async def integrated_search(
-        request: Request,
-        q: str = "",
-        type: str | None = None,
-        project: str | None = None,
-        branch: str | None = None,
-        agent: str | None = None,
-        limit: int = 100,
-    ) -> list[SearchHit]:
-        """One query across tasks, issues and log entries.
-
-        `type` is a comma-separated subset of task,issue,log; anything else is
-        ignored rather than erroring, so a stale bookmark still returns results.
-        """
-        st: AppState = request.app.state.cc
-        wanted = tuple(
-            t for t in (type or "").split(",") if t.strip() in SEARCH_TYPES
-        ) or SEARCH_TYPES
-        return search(
-            st.store, st.logstore, q=q, types=wanted, project=project,
-            branch=branch, agent=agent, limit=min(limit, 500),
-        )
-
-    # -- console ------------------------------------------------------------ #
-    # Mounted last: a StaticFiles mount is greedy about its prefix, and the API
-    # routes above must keep theirs.
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/web/")
 
     if config.web_dir.is_dir():
-        @app.get("/", include_in_schema=False)
-        async def console() -> RedirectResponse:
-            return RedirectResponse("/web/")
-
-        app.mount(
-            "/web", ConsoleFiles(directory=config.web_dir, html=True), name="console"
-        )
-    else:
-        log.warning("no console: %s is not a directory", config.web_dir)
+        app.mount("/web", ConsoleFiles(directory=config.web_dir, html=True), name="web")
 
     return app
 
 
 configure_logging(os.environ.get("CC_AUTOMATION_LOG_LEVEL", "INFO"))
-app = create_app()
+app_factory = create_app
+
+
+def _build() -> FastAPI:
+    return create_app()
+
+
+app = _build()

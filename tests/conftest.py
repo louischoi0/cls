@@ -5,12 +5,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from server.models import AgentConfig  # noqa: E402
+from server.models import SessionConfig  # noqa: E402
 from server.registry import Registry  # noqa: E402
 
+#: Every test that builds an app uses this, so a key is never read off the box.
+KEY = "test-key-abcdefghijklmnop"
+AUTH = {"X-API-Key": KEY}
 
-def make_agent(name: str, tags: list[str], cwd: Path, **kw) -> AgentConfig:
-    return AgentConfig(name=name, tags=tags, cwd=cwd, **kw)
+
+def make_session(name: str, cwd: Path, **kw) -> SessionConfig:
+    return SessionConfig(name=name, cwd=cwd, **kw)
 
 
 @pytest.fixture
@@ -22,9 +26,4 @@ def workdir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def registry(workdir: Path) -> Registry:
-    return Registry(
-        [
-            make_agent("alpha", ["research", "shared"], workdir),
-            make_agent("beta", ["ops", "shared"], workdir),
-        ]
-    )
+    return Registry([make_session("alpha", workdir), make_session("beta", workdir)])

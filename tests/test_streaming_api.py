@@ -21,15 +21,6 @@ from server.stream import StreamHub
 KEY = "test-key-abcdefghijklmnop"
 AUTH = {"X-API-Key": KEY}
 
-AGENTS_YAML = """
-agents:
-  - name: alpha
-    tags: [research]
-    cwd: {cwd}
-    allowed_tools: [Read]
-    permission_mode: bypassPermissions
-"""
-
 #: One line per event, exactly as `claude --output-format stream-json` writes it.
 STREAMED = [
     {"type": "system", "subtype": "init", "model": "claude-opus-5", "session_id": "sid-1"},
@@ -60,10 +51,18 @@ def fake_claude(tmp_path: Path, lines, name: str = "fake-claude") -> str:
 
 @pytest.fixture
 def home(tmp_path: Path) -> Path:
-    work = tmp_path / "work"
-    work.mkdir()
-    (tmp_path / "agents.yaml").write_text(AGENTS_YAML.format(cwd=work))
+    (tmp_path / "work").mkdir()
     return tmp_path
+
+
+def with_session(client, home: Path, name: str = "alpha"):
+    """Every test here needs one session; it is created rather than declared."""
+    response = client.post(
+        "/sessions", json={"name": name, "cwd": str(home / "work"),
+                           "allowed_tools": ["Read"]}, headers=AUTH,
+    )
+    assert response.status_code == 201, response.text
+    return client
 
 
 @pytest.fixture
@@ -73,7 +72,7 @@ def client(home: Path, tmp_path: Path):
         claude_bin=fake_claude(tmp_path, STREAMED),
     )
     with TestClient(create_app(config)) as c:
-        yield c
+        yield with_session(c, home)
 
 
 def wait_done(client, message_id: str) -> dict:
@@ -98,7 +97,7 @@ def sse_events(text: str) -> list[dict]:
 
 def test_a_streamed_run_is_parsed_into_its_result(client):
     accepted = client.post(
-        "/messages", json={"text": "ping", "tags": ["alpha"]}, headers=AUTH
+        "/sessions/alpha/messages", json={"text": "ping"}, headers=AUTH
     ).json()
     record = wait_done(client, accepted["message_id"])
     assert record["status"] == "done"
@@ -106,7 +105,7 @@ def test_a_streamed_run_is_parsed_into_its_result(client):
 
 def test_the_run_is_replayable_after_it_finishes(client):
     accepted = client.post(
-        "/messages", json={"text": "ping", "tags": ["alpha"]}, headers=AUTH
+        "/sessions/alpha/messages", json={"text": "ping"}, headers=AUTH
     ).json()
     wait_done(client, accepted["message_id"])
 
@@ -134,34 +133,10 @@ def test_a_run_nobody_kept_is_a_404(client):
 
 def test_the_stream_needs_the_api_key(client):
     accepted = client.post(
-        "/messages", json={"text": "ping", "tags": ["alpha"]}, headers=AUTH
+        "/sessions/alpha/messages", json={"text": "ping"}, headers=AUTH
     ).json()
     wait_done(client, accepted["message_id"])
     assert client.get(f"/messages/{accepted['message_id']}/stream").status_code == 401
-
-
-def test_a_task_is_watched_by_its_message_id(client, tmp_path: Path):
-    """A task has a message id, so a task and a plain message stream alike."""
-    root = tmp_path / "proj"
-    root.mkdir()
-    client.post(
-        "/projects",
-        json={"name": "Demo", "root_dir": str(root),
-              "manager": {"name": "pm", "role": "manager"}},
-        headers=AUTH,
-    )
-    task = client.post(
-        "/projects/demo/tasks",
-        json={"agent": "pm", "title": "Look", "text": "at it"},
-        headers=AUTH,
-    ).json()
-    wait_done(client, task["message_id"])
-
-    events = sse_events(
-        client.get(f"/messages/{task['message_id']}/stream", headers=AUTH).text
-    )
-    assert [e["kind"] for e in events][:2] == ["start", "notice"]
-    assert events[0]["text"] == "demo__pm started"
 
 
 BUDGET_STOP = [
@@ -186,12 +161,13 @@ def test_a_run_that_explains_itself_is_not_reported_as_a_bare_exit_code(
     )
     config = Config(home=home, api_key=KEY, start_workers=True, claude_bin=binary)
     with TestClient(create_app(config)) as client:
+        with_session(client, home)
         accepted = client.post(
-            "/messages", json={"text": "ping", "tags": ["alpha"]}, headers=AUTH
+            "/sessions/alpha/messages", json={"text": "ping"}, headers=AUTH
         ).json()
         record = wait_done(client, accepted["message_id"])
         assert record["status"] == "failed"
-        error = record["targets"][0]["error"]
+        error = record["error"]
         assert error == "Reached maximum budget ($0.05)"
         assert "exited 1" not in error
 
@@ -210,11 +186,12 @@ def test_a_run_that_dies_without_a_result_reports_what_it_printed(
     binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
     config = Config(home=home, api_key=KEY, start_workers=True, claude_bin=str(binary))
     with TestClient(create_app(config)) as client:
+        with_session(client, home)
         accepted = client.post(
-            "/messages", json={"text": "ping", "tags": ["alpha"]}, headers=AUTH
+            "/sessions/alpha/messages", json={"text": "ping"}, headers=AUTH
         ).json()
         record = wait_done(client, accepted["message_id"])
-        error = record["targets"][0]["error"]
+        error = record["error"]
         assert "exited 1" in error
         assert "something went wrong before we started" in error
         assert "(no output)" not in error
@@ -228,12 +205,13 @@ def test_a_failing_run_still_streams_what_it_did(tmp_path: Path, home: Path):
         claude_bin=fake_claude(tmp_path, BUDGET_STOP, name="fake-budget"),
     )
     with TestClient(create_app(config)) as client:
+        with_session(client, home)
         accepted = client.post(
-            "/messages", json={"text": "ping", "tags": ["alpha"]}, headers=AUTH
+            "/sessions/alpha/messages", json={"text": "ping"}, headers=AUTH
         ).json()
         record = wait_done(client, accepted["message_id"])
         assert record["status"] == "failed"
-        assert "maximum budget" in record["targets"][0]["error"]
+        assert "maximum budget" in record["error"]
 
         events = sse_events(
             client.get(f"/messages/{accepted['message_id']}/stream", headers=AUTH).text
@@ -254,8 +232,9 @@ def test_an_over_long_line_is_dropped_without_losing_the_run(tmp_path: Path, hom
 
     config = Config(home=home, api_key=KEY, start_workers=True, claude_bin=binary)
     with TestClient(create_app(config)) as client:
+        with_session(client, home)
         accepted = client.post(
-            "/messages", json={"text": "ping", "tags": ["alpha"]}, headers=AUTH
+            "/sessions/alpha/messages", json={"text": "ping"}, headers=AUTH
         ).json()
         assert wait_done(client, accepted["message_id"])["status"] == "done"
 
@@ -274,7 +253,7 @@ def test_a_sealed_stream_carries_ciphertext_frames(client):
     from server.sealed import AUTH_HEADER, SEALED_HEADER, VERSION, SealedSession
 
     accepted = client.post(
-        "/messages", json={"text": "ping", "tags": ["alpha"]}, headers=AUTH
+        "/sessions/alpha/messages", json={"text": "ping"}, headers=AUTH
     ).json()
     wait_done(client, accepted["message_id"])
 

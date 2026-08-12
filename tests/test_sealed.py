@@ -31,21 +31,9 @@ from server.sealed import (
 
 KEY = "test-key-abcdefghijklmnop"
 
-AGENTS_YAML = """
-agents:
-  - name: alpha
-    tags: [research, shared]
-    cwd: {cwd}
-    allowed_tools: [Read]
-    permission_mode: bypassPermissions
-"""
-
-
 @pytest.fixture
 def home(tmp_path: Path) -> Path:
-    work = tmp_path / "work"
-    work.mkdir()
-    (tmp_path / "agents.yaml").write_text(AGENTS_YAML.format(cwd=work))
+    (tmp_path / "work").mkdir()
     return tmp_path
 
 
@@ -54,10 +42,20 @@ def build(home: Path, **kw):
     return TestClient(create_app(config))
 
 
+def with_session(client, home: Path, name: str = "alpha"):
+    """A sealed server still has to be given something to talk to."""
+    response = client.post(
+        "/sessions", json={"name": name, "cwd": str(home / "work")},
+        headers={"X-API-Key": KEY},
+    )
+    assert response.status_code == 201, response.text
+    return client
+
+
 @pytest.fixture
 def client(home: Path):
     with build(home) as c:
-        yield c
+        yield with_session(c, home)
 
 
 @pytest.fixture
@@ -190,15 +188,15 @@ def test_expired_nonces_leave_the_cache():
 
 
 def test_claims_bind_the_method(session):
-    auth, _ = session.seal_request("GET", "/agents", None, None)
+    auth, _ = session.seal_request("GET", "/sessions", None, None)
     with pytest.raises(SealError):
-        session.open_request("DELETE", "/agents", auth, b"")
+        session.open_request("DELETE", "/sessions", auth, b"")
 
 
 def test_claims_bind_the_path(session):
-    auth, _ = session.seal_request("GET", "/agents", None, None)
+    auth, _ = session.seal_request("GET", "/sessions", None, None)
     with pytest.raises(SealError):
-        session.open_request("GET", "/projects", auth, b"")
+        session.open_request("GET", "/logs", auth, b"")
 
 
 def test_claims_bind_the_query_string(session):
@@ -208,62 +206,62 @@ def test_claims_bind_the_query_string(session):
 
 
 def test_claims_bind_the_body(session):
-    auth, _ = session.seal_request("POST", "/messages", b'{"a":1}', "application/json")
+    auth, _ = session.seal_request("POST", "/sessions/alpha/messages", b'{"a":1}', "application/json")
     substituted = seal(session.key, b'{"a":2}', AAD_REQUEST).encode()
     with pytest.raises(SealError):
-        session.open_request("POST", "/messages", auth, substituted)
+        session.open_request("POST", "/sessions/alpha/messages", auth, substituted)
 
 
 def test_the_matching_body_opens(session):
     """The counterpart to the test above: the binding is what refused it, not
     the key. A second envelope, because the first burned its nonce."""
-    auth, body = session.seal_request("POST", "/messages", b'{"a":1}', "application/json")
-    assert session.open_request("POST", "/messages", auth, body)[0] == b'{"a":1}'
+    auth, body = session.seal_request("POST", "/sessions/alpha/messages", b'{"a":1}', "application/json")
+    assert session.open_request("POST", "/sessions/alpha/messages", auth, body)[0] == b'{"a":1}'
 
 
 def test_a_rejected_request_still_burns_its_nonce(session):
     """Freshness is checked before the bindings, so a failed attempt cannot be
     retried with a corrected body. Fail closed: an envelope is used once,
     whatever the outcome."""
-    auth, body = session.seal_request("POST", "/messages", b'{"a":1}', "application/json")
+    auth, body = session.seal_request("POST", "/sessions/alpha/messages", b'{"a":1}', "application/json")
     with pytest.raises(SealError):
         session.open_request("POST", "/wrong-path", auth, body)
     with pytest.raises(SealError):
-        session.open_request("POST", "/messages", auth, body)
+        session.open_request("POST", "/sessions/alpha/messages", auth, body)
 
 
 def test_a_body_without_a_claim_is_refused(session):
-    auth, _ = session.seal_request("POST", "/messages", None, None)
+    auth, _ = session.seal_request("POST", "/sessions/alpha/messages", None, None)
     smuggled = seal(session.key, b'{"a":1}', AAD_REQUEST).encode()
     with pytest.raises(SealError):
-        session.open_request("POST", "/messages", auth, smuggled)
+        session.open_request("POST", "/sessions/alpha/messages", auth, smuggled)
 
 
 def test_a_claimed_body_that_is_missing_is_refused(session):
-    auth, _ = session.seal_request("POST", "/messages", b'{"a":1}', "application/json")
+    auth, _ = session.seal_request("POST", "/sessions/alpha/messages", b'{"a":1}', "application/json")
     with pytest.raises(SealError):
-        session.open_request("POST", "/messages", auth, b"")
+        session.open_request("POST", "/sessions/alpha/messages", auth, b"")
 
 
 def test_claims_that_are_not_json_are_refused(session):
     with pytest.raises(SealError):
-        session.open_request("GET", "/agents", seal(session.key, b"nope", b"cc-automation/sealed/v1/auth"), b"")
+        session.open_request("GET", "/sessions", seal(session.key, b"nope", b"cc-automation/sealed/v1/auth"), b"")
 
 
 def test_claims_with_a_wrong_shape_are_refused(session):
     envelope = seal(
-        session.key, json.dumps({"m": "GET", "p": "/agents"}).encode(),
+        session.key, json.dumps({"m": "GET", "p": "/sessions"}).encode(),
         b"cc-automation/sealed/v1/auth",
     )
     with pytest.raises(SealError):
-        session.open_request("GET", "/agents", envelope, b"")
+        session.open_request("GET", "/sessions", envelope, b"")
 
 
 # -- middleware, end to end -------------------------------------------------
 
 
 def test_a_sealed_get_is_served(client, session):
-    status, text = call(client, session, "GET", "/agents")
+    status, text = call(client, session, "GET", "/sessions")
     assert status == 200
     assert [a["name"] for a in json.loads(text)] == ["alpha"]
 
@@ -271,7 +269,7 @@ def test_a_sealed_get_is_served(client, session):
 def test_the_key_never_appears_on_the_wire(client, session):
     """The whole point: no request carries the credential."""
     auth, body = session.seal_request(
-        "POST", "/messages", json.dumps({"text": "secret words", "tags": ["research"]}).encode(),
+        "POST", "/sessions/alpha/messages", json.dumps({"text": "secret words"}).encode(),
         "application/json",
     )
     assert KEY not in auth
@@ -281,8 +279,8 @@ def test_the_key_never_appears_on_the_wire(client, session):
 
 def test_a_sealed_post_reaches_the_route(client, session):
     status, text = call(
-        client, session, "POST", "/messages",
-        {"text": "summarise today", "tags": ["research"], "topic": "daily"},
+        client, session, "POST", "/sessions/alpha/messages",
+        {"text": "summarise today"},
     )
     assert status == 202
     queue = client.app.state.cc.dispatcher.queue("alpha")
@@ -290,16 +288,16 @@ def test_a_sealed_post_reaches_the_route(client, session):
 
 
 def test_the_response_body_is_ciphertext(client, session):
-    auth, _ = session.seal_request("GET", "/agents", None, None)
-    raw = client.get("/agents", headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
+    auth, _ = session.seal_request("GET", "/sessions", None, None)
+    raw = client.get("/sessions", headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
     assert raw.headers["content-type"].startswith(SEALED_MEDIA_TYPE)
     assert b"alpha" not in raw.content
     assert json.loads(session.open_response(raw.content))[0]["name"] == "alpha"
 
 
 def test_the_inner_content_type_is_reported(client, session):
-    auth, _ = session.seal_request("GET", "/agents", None, None)
-    raw = client.get("/agents", headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
+    auth, _ = session.seal_request("GET", "/sessions", None, None)
+    raw = client.get("/sessions", headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
     assert raw.headers["X-CC-Type"].startswith("application/json")
 
 
@@ -311,42 +309,42 @@ def test_a_sealed_error_is_still_sealed(client, session):
 
 def test_a_forged_envelope_is_rejected(client):
     forged = SealedSession("not-the-key")
-    auth, _ = forged.seal_request("GET", "/agents", None, None)
-    response = client.get("/agents", headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
+    auth, _ = forged.seal_request("GET", "/sessions", None, None)
+    response = client.get("/sessions", headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
     assert response.status_code == 401
 
 
 def test_a_sealed_request_without_an_envelope_is_rejected(client):
-    assert client.get("/agents", headers={SEALED_HEADER: VERSION}).status_code == 401
+    assert client.get("/sessions", headers={SEALED_HEADER: VERSION}).status_code == 401
 
 
 def test_a_replayed_request_is_rejected(client, session):
-    auth, _ = session.seal_request("GET", "/agents", None, None)
+    auth, _ = session.seal_request("GET", "/sessions", None, None)
     headers = {SEALED_HEADER: VERSION, AUTH_HEADER: auth}
-    assert client.get("/agents", headers=headers).status_code == 200
-    assert client.get("/agents", headers=headers).status_code == 401
+    assert client.get("/sessions", headers=headers).status_code == 200
+    assert client.get("/sessions", headers=headers).status_code == 401
 
 
 def test_an_envelope_replayed_onto_another_route_is_rejected(client, session):
-    auth, _ = session.seal_request("GET", "/agents", None, None)
-    response = client.get("/projects", headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
+    auth, _ = session.seal_request("GET", "/sessions", None, None)
+    response = client.get("/logs", headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
     assert response.status_code == 401
 
 
 def test_a_stale_envelope_is_rejected(client, session):
-    claims = Claims(method="GET", path="/agents", ts=int(time.time()) - 3600)
+    claims = Claims(method="GET", path="/sessions", ts=int(time.time()) - 3600)
     auth = seal_claims(session.key, claims)
-    response = client.get("/agents", headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
+    response = client.get("/sessions", headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
     assert response.status_code == 401
 
 
 def test_rejection_says_nothing_about_which_check_failed(client, session):
     """Bad key and stale clock must be indistinguishable to the caller."""
     forged = SealedSession("not-the-key")
-    bad_key, _ = forged.seal_request("GET", "/agents", None, None)
-    stale = seal_claims(session.key, Claims("GET", "/agents", int(time.time()) - 3600))
+    bad_key, _ = forged.seal_request("GET", "/sessions", None, None)
+    stale = seal_claims(session.key, Claims("GET", "/sessions", int(time.time()) - 3600))
     answers = {
-        client.get("/agents", headers={SEALED_HEADER: VERSION, AUTH_HEADER: env}).text
+        client.get("/sessions", headers={SEALED_HEADER: VERSION, AUTH_HEADER: env}).text
         for env in (bad_key, stale)
     }
     assert len(answers) == 1
@@ -356,7 +354,7 @@ def test_rejection_says_nothing_about_which_check_failed(client, session):
 
 
 def test_plaintext_still_works_by_default(client):
-    assert client.get("/agents", headers={"X-API-Key": KEY}).status_code == 200
+    assert client.get("/sessions", headers={"X-API-Key": KEY}).status_code == 200
 
 
 def test_health_is_still_open(client):
@@ -365,14 +363,20 @@ def test_health_is_still_open(client):
 
 def test_require_sealed_refuses_plaintext(home):
     with build(home, require_sealed=True) as c:
-        response = c.get("/agents", headers={"X-API-Key": KEY})
+        response = c.get("/sessions", headers={"X-API-Key": KEY})
         assert response.status_code == 426
         assert "sealed" in response.json()["detail"]
 
 
 def test_require_sealed_still_serves_sealed(home):
+    """Both ends of the lifecycle, sealed: a server in this mode has no other
+    door, so creating the session has to go through the envelope as well."""
     with build(home, require_sealed=True) as c:
-        status, text = call(c, SealedSession(KEY), "GET", "/agents")
+        session = SealedSession(KEY)
+        made, _ = call(c, session, "POST", "/sessions",
+                       {"name": "alpha", "cwd": str(home / "work")})
+        assert made == 201
+        status, text = call(c, session, "GET", "/sessions")
         assert status == 200
         assert [a["name"] for a in json.loads(text)] == ["alpha"]
 
@@ -402,8 +406,8 @@ def test_the_client_and_the_server_agree_on_framing(session):
 
     client = SealedClient(api_key=KEY)
     auth, body = client.session.seal_request(
-        "POST", "/messages", b'{"text":"hi"}', "application/json"
+        "POST", "/sessions/alpha/messages", b'{"text":"hi"}', "application/json"
     )
-    plain, content_type = SealedSession(KEY).open_request("POST", "/messages", auth, body)
+    plain, content_type = SealedSession(KEY).open_request("POST", "/sessions/alpha/messages", auth, body)
     assert plain == b'{"text":"hi"}'
     assert content_type == "application/json"

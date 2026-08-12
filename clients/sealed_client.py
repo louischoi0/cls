@@ -4,8 +4,8 @@
 is on, because curl cannot build an envelope. This is the replacement: the same
 calls, sealed, over plain HTTP.
 
-    python -m clients.sealed_client GET /agents
-    python -m clients.sealed_client POST /messages -d '{"text":"hi","tags":["research"]}'
+    python -m clients.sealed_client GET /sessions
+    python -m clients.sealed_client POST /sessions/research/messages -d '{"text":"hi"}'
     python -m clients.sealed_client --url http://10.1.0.4:9999 GET /health
 
 It imports `server.sealed`, so client and server frame envelopes with one

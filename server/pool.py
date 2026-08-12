@@ -1,12 +1,8 @@
-"""The runtime set of agents: registry entry, queue and worker as one unit.
+"""The runtime set of sessions: registry entry, queue and worker as one unit.
 
-`agents.yaml` agents and project agents differ only in where their definition
-came from. Below this line nothing knows the difference — a project agent gets
-a FIFO queue, one serial worker and its own resumable session, exactly as
-README FR-3 requires of any agent.
-
-Adding or removing an agent touches three structures that must not drift apart,
-so it happens in exactly one place.
+Creating a session touches three structures that must not drift apart — the
+registry that names it, the queue its turns land in, and the worker that runs
+them — so it happens in exactly one place. Deleting it unwinds the same three.
 """
 
 from __future__ import annotations
@@ -17,9 +13,9 @@ from typing import Callable
 
 from .dispatcher import Dispatcher
 from .logstore import LogStore
-from .models import AgentConfig
+from .models import SessionConfig
 from .registry import Registry
-from .runner import AgentWorker, JobObserver, SessionStore
+from .runner import AgentWorker, JobObserver, SessionIds
 from .stream import StreamHub
 
 log = logging.getLogger("cc_automation.pool")
@@ -31,7 +27,7 @@ class AgentPool:
         *,
         registry: Registry,
         dispatcher: Dispatcher,
-        sessions: SessionStore,
+        sessions: SessionIds,
         logstore: LogStore,
         status,
         claude_bin: str,
@@ -56,8 +52,8 @@ class AgentPool:
         self.workers: dict[str, AgentWorker] = {}
         self.tasks: dict[str, asyncio.Task] = {}
 
-    def start(self, agent: AgentConfig) -> AgentWorker:
-        """Give an already-registered agent its queue and worker."""
+    def start(self, agent: SessionConfig) -> AgentWorker:
+        """Give an already-registered session its queue and worker."""
         worker = self.worker_factory(
             agent=agent,
             queue=self.dispatcher.add(agent.name),
@@ -76,13 +72,13 @@ class AgentPool:
             )
         return worker
 
-    def add(self, agent: AgentConfig, extra_tags: list[str] | None = None) -> AgentWorker:
-        """Register an agent and start it. Raises RegistryError on a name clash."""
-        self.registry.add(agent, extra_tags)
+    def add(self, agent: SessionConfig) -> AgentWorker:
+        """Register a session and start its worker. RegistryError on a name clash."""
+        self.registry.add(agent)
         return self.start(agent)
 
-    def reconfigure(self, agent: AgentConfig) -> None:
-        """Give an existing agent new settings, keeping its queue and worker.
+    def reconfigure(self, agent: SessionConfig) -> None:
+        """Give an existing session new settings, keeping its queue and worker.
 
         A run already in flight keeps the settings it was spawned with — its
         command line was built before this call. The next job off the queue uses

@@ -3,34 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>cls · project console</title>
+  <title>cls · chat console</title>
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#9635;</text></svg>">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#/">cls<span>console</span></a>
-    <nav id="nav">
-      <!--
-        No "Projects" item: the selector on the right is the one place a project
-        is chosen. A nav link to the list would be a second way to designate the
-        scope, and the two would disagree. The list is still there — the brand
-        opens it, which is also where a new project is created.
-      -->
-      <!-- Follows the project selector: the dashboard for whatever is scoped. -->
-      <a href="#/dashboard" id="nav-dashboard">Dashboard</a>
-      <a href="#/terminal">Terminal</a>
-      <a href="#/logs">Logs</a>
-      <a href="#/search">Search</a>
-    </nav>
+    <a class="brand" href="#/">cls<span>chat</span></a>
     <div class="topbar-right">
-      <!-- Global scope: every page filters by whatever is chosen here. -->
-      <select id="project-select" class="mono" title="Scope every page to one project">
-        <option value="">all projects</option>
-      </select>
-      <!-- The list is no longer in the nav, so the way to add one lives beside
-           the selector it will appear in. -->
-      <a href="#/" id="nav-projects" class="icon-btn" title="All projects — and where a new one is created">＋</a>
       <span id="pulse" class="pulse" title="idle"></span>
       <button id="theme" class="icon-btn" title="Toggle theme">◐</button>
       <button id="keybtn" class="icon-btn" title="API key">⚿</button>
@@ -41,7 +21,26 @@
        silent condition. app.js fills it in; see sealingStatus(). -->
   <div id="wirewarn" class="wirewarn" hidden></div>
 
-  <main id="view" aria-live="polite"></main>
+  <main class="chat">
+    <aside class="chat-rail">
+      <div class="chat-rail-head">
+        <span class="faint">Sessions</span>
+        <button type="button" id="rail-new" class="ghost" title="Create a session">New</button>
+      </div>
+      <div id="new-panel" hidden></div>
+      <div id="rail-list"></div>
+    </aside>
+
+    <section class="chat-main">
+      <div id="chat-header"></div>
+      <div id="chat-log" class="chat-log" aria-live="polite"></div>
+      <div id="composer" class="composer" hidden>
+        <textarea id="say" rows="1" placeholder="Say something…" autocomplete="off"></textarea>
+        <button id="send" class="primary" disabled>Send</button>
+        <div id="chat-hint" class="chat-hint faint"></div>
+      </div>
+    </section>
+  </main>
 
   <div id="toasts" class="toasts"></div>
 

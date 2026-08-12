@@ -45,7 +45,7 @@ The claims bind the auth envelope to one method, one path and one body, so a
 captured envelope cannot be replayed against a different route or re-pointed at
 substituted ciphertext::
 
-    {"m": "POST", "p": "/projects", "ts": 1765..., "bh": "<sha256 of the
+    {"m": "POST", "p": "/sessions", "ts": 1765..., "bh": "<sha256 of the
      sealed body, hex>", "ct": "application/json"}
 
 Freshness is `ts` within `SKEW_S`, plus a nonce cache so a capture cannot be

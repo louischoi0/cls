@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .logstore import LogStore, LogStoreError
-from .models import AgentConfig
+from .models import SessionConfig
 from .stream import StreamHub, describe
 
 log = logging.getLogger("cc_automation.runner")
@@ -47,15 +47,9 @@ class Job:
     message_id: str
     agent: str
     text: str
+    #: the log file this turn is written to; the session's own name
     topic: str
-    #: set when this job is a project task, so an observer can write the
-    #: outcome back to the task row (docs/PROJECTS.md FR-P3)
-    task_id: str | None = None
-    #: git branch this work belongs to, recorded in the log entry
-    branch: str | None = None
-    #: resolved with the RunResult when the caller needs to await this one run.
-    #: A planning round uses it to go *through* the manager's queue instead of
-    #: around it, so the manager's session is still never resumed concurrently.
+    #: resolved with the RunResult when a caller needs to await this one run
     future: "asyncio.Future | None" = field(default=None, repr=False, compare=False)
 
 
@@ -88,7 +82,7 @@ class RunResult:
     session_was_reset: bool = False
 
 
-class SessionStore:
+class SessionIds:
     """agent name -> Claude Code session id, persisted across restarts."""
 
     def __init__(self, path: Path) -> None:
@@ -150,7 +144,7 @@ def resolve_claude_bin() -> str:
 
 
 def build_argv(
-    claude_bin: str, agent: AgentConfig, text: str, session_id: str, resume: bool
+    claude_bin: str, agent: SessionConfig, text: str, session_id: str, resume: bool
 ) -> list[str]:
     """The exact command line for one invocation.
 
@@ -179,9 +173,9 @@ def build_argv(
 class AgentWorker:
     def __init__(
         self,
-        agent: AgentConfig,
+        agent: SessionConfig,
         queue: asyncio.Queue,
-        sessions: SessionStore,
+        sessions: SessionIds,
         logstore: LogStore,
         status,
         claude_bin: str,
@@ -275,7 +269,6 @@ class AgentWorker:
                 when=started,
                 agent=self.agent.name,
                 message_id=job.message_id,
-                branch=job.branch,
                 text=job.text,
                 result=body,
                 duration_s=result.duration_s,
