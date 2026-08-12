@@ -485,14 +485,14 @@ function chatStatus(session, sessions) {
 function chatIntent(text, session) {
   if (!session) return { ok: false, hint: 'Create a session to talk to.' };
   if (!String(text || '').trim()) {
-    return { ok: false, hint: 'enter ⏎ send · shift+enter newline · ctrl+b sessions' };
+    return { ok: false, hint: 'enter ⏎ send · shift+enter newline · ctrl+l focus · ctrl+b sessions' };
   }
   if (session.busy || session.queue_depth) {
     // Turns are serialised per session, so this is a queue position and not a
     // refusal. Saying so beats a send button that looks like it did nothing.
     return { ok: true, hint: `${session.name} is busy — this goes on its queue.` };
   }
-  return { ok: true, hint: 'enter ⏎ send · shift+enter newline · ctrl+b sessions' };
+  return { ok: true, hint: 'enter ⏎ send · shift+enter newline · ctrl+l focus · ctrl+b sessions' };
 }
 
 //: What a new session gets when the operator does not say otherwise. Read-only

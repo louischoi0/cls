@@ -539,3 +539,70 @@ def test_a_hostile_cli_title_cannot_break_out_of_the_link_list(js):
              "modified_at": "2026-08-12T00:00:00Z", "path": "/p", "owner": None}]
     out = js.ctx.eval(f"String(cliSessionList({json.dumps(rows)}))")
     assert "<script>" not in out
+
+
+# --- the frame --------------------------------------------------------------- #
+
+
+def test_no_rule_insets_the_panes_from_the_frame():
+    """`<main class="term-main">` is a `main` element, and a leftover
+    `main { max-width: 1100px; margin: 0 auto; padding: 28px 20px 80px }` was
+    still landing on it — which insetted the whole transcript away from the rail
+    and put a margin where the divider should have been. Nothing may style bare
+    `main`, `section` or `aside` again."""
+    import re
+
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    for rule in re.findall(r"^([a-z, ]+)\s*\{", css, re.M):
+        selectors = {s.strip() for s in rule.split(",")}
+        assert not (selectors & {"main", "section", "aside", "header", "nav"}), rule
+
+
+def test_every_pane_shares_one_gutter():
+    """Rail rows, the title line, the transcript and the prompt all sit on one
+    vertical line. If they drift apart the page reads as four boxes."""
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    for selector in (".rail-row", ".term-title", ".term-log", ".prompt-box",
+                     ".rail-head", ".session-form"):
+        rule = css.split(f"{selector} {{")[1].split("}")[0]
+        assert "var(--pad)" in rule, f"{selector} does not use the shared gutter"
+
+
+def test_the_two_headers_are_one_row_tall():
+    """The rail's head and the pane's title line sit either side of the divider,
+    so a mismatch in height is visible as a step."""
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    for selector in (".rail-head", ".term-title"):
+        rule = css.split(f"{selector} {{")[1].split("}")[0]
+        assert "height: var(--chrome-h)" in rule, selector
+
+
+def test_the_stylesheet_only_covers_classes_the_page_uses():
+    """Dead CSS is how the `main` rule survived the rewrite that orphaned it."""
+    import re
+
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    sources = "".join(
+        (WEB / name).read_text(encoding="utf-8")
+        for name in ("index.html", "app.js", "render.js")
+    )
+    styled = set(re.findall(r"\.([a-z][a-z0-9-]+)", css))
+    # Classes applied by script rather than written literally in a class="".
+    dynamic = {"busy", "error", "on", "mine", "theirs", "failed", "pending",
+               "no-rail", "caret", "danger", "send", "none", "result", "end"}
+    # Backticks too: some classes are only ever set through a template literal
+    # (`node.className = `toast ${...}``), which quotes alone would miss.
+    used = set(re.findall(r"[\"'` ]([a-z][a-z0-9-]+)[\"'` ]", sources))
+    unused = styled - used - dynamic
+    assert not unused, f"styled but never used: {sorted(unused)}"
+
+
+def test_ctrl_l_focuses_the_prompt():
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    handler = app.split("key === 'l'")[1].split("}")[0]
+    assert "say.focus()" in handler
+
+
+def test_the_hint_names_the_keys():
+    js_source = (WEB / "render.js").read_text(encoding="utf-8")
+    assert "ctrl+l" in js_source and "ctrl+b" in js_source

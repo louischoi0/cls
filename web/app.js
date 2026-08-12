@@ -619,9 +619,18 @@ function initChat() {
     setRail(document.querySelector('.term').classList.contains('no-rail'));
   });
   document.addEventListener('keydown', (e) => {
-    if (e.ctrlKey && (e.key === 'b' || e.key === 'B')) {
+    if (!e.ctrlKey || e.metaKey || e.altKey) return;
+    const key = e.key.toLowerCase();
+    if (key === 'b') {
       e.preventDefault();
       setRail(document.querySelector('.term').classList.contains('no-rail'));
+    } else if (key === 'l') {
+      // Focus the prompt of whatever session is open, from anywhere on the page.
+      const say = $('#say');
+      if (!say || $('#composer').hidden) return;
+      e.preventDefault();
+      say.focus();
+      say.selectionStart = say.selectionEnd = say.value.length;
     }
   });
 
