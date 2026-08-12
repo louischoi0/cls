@@ -30,6 +30,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from .models import TurnStep
+
 #: Where the CLI keeps conversations. Overridable so tests never read the real one.
 DEFAULT_ROOT = Path("~/.claude/projects")
 
@@ -178,3 +180,120 @@ def path_for(session_id: str, cwd: Path | str, root: Path | str | None = None) -
     an id but has not run yet — which is what the console shows as "no file yet".
     """
     return root_dir(root) / project_dir_name(cwd) / f"{session_id}.jsonl"
+
+
+class CliTurn(BaseModel):
+    """One turn of a CLI conversation, as the console replays it."""
+
+    role: str
+    text: str
+    at: datetime | None = None
+    steps: list[TurnStep] = []
+
+
+def _blocks(content) -> list:
+    return content if isinstance(content, list) else []
+
+
+def _stamp(record: dict) -> datetime | None:
+    raw = record.get("timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _tool_line(block: dict) -> str:
+    """A `tool_use` block as one line, the way the CLI prints it."""
+    name = block.get("name") or "tool"
+    args = block.get("input")
+    if isinstance(args, dict):
+        for key in ("command", "file_path", "path", "pattern", "query", "url", "prompt"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"{name}({value.strip().splitlines()[0][:120]})"
+    return f"{name}()"
+
+
+def read_turns(path: Path | str, limit: int = 200) -> list[CliTurn]:
+    """A conversation on disk -> its turns, oldest last, at most `limit`.
+
+    What counts as a turn is the whole trick here. The CLI's `user` records are
+    two different things wearing one name: a record whose `content` is a
+    **string** is something a person typed, and one whose content is a list of
+    `tool_result` blocks is the harness feeding a tool's output back to the
+    model. Only the first is a turn; treating the second as one produces a
+    transcript where the user appears to say `total 92 drwxrwxr-x ...`.
+
+    Assistant text is the reply; `tool_use` and `thinking` become the steps
+    under it, which is the same shape a live run streams.
+
+    Streamed and kept in a ring, so a multi-megabyte conversation costs one pass
+    and `limit` turns of memory rather than the whole file.
+    """
+    from collections import deque
+
+    path = Path(path)
+    turns: deque[CliTurn] = deque(maxlen=max(1, limit))
+    said: list[str] = []
+    steps: list[TurnStep] = []
+    when: datetime | None = None
+
+    def flush() -> None:
+        nonlocal said, steps, when
+        if said or steps:
+            turns.append(CliTurn(
+                role="agent", text="\n\n".join(said), at=when, steps=steps,
+            ))
+        said, steps, when = [], [], None
+
+    try:
+        handle = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    with handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            kind = record.get("type")
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+
+            if kind == "user":
+                content = message.get("content")
+                if isinstance(content, str):
+                    # A person typed this: it closes whatever the model was
+                    # saying and opens a turn of its own.
+                    flush()
+                    if content.strip():
+                        turns.append(CliTurn(
+                            role="user", text=content, at=_stamp(record),
+                        ))
+                else:
+                    for block in _blocks(content):
+                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                            steps.append(TurnStep(
+                                kind="tool_result",
+                                text="error" if block.get("is_error") else "ok",
+                            ))
+            elif kind == "assistant":
+                when = when or _stamp(record)
+                for block in _blocks(message.get("content")):
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type")
+                    if btype == "text" and str(block.get("text") or "").strip():
+                        said.append(str(block["text"]).strip())
+                    elif btype == "tool_use":
+                        steps.append(TurnStep(kind="tool", text=_tool_line(block)))
+                    elif btype == "thinking":
+                        steps.append(TurnStep(kind="thinking", text="thinking"))
+    flush()
+    return list(turns)

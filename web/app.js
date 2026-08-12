@@ -443,12 +443,17 @@ async function loadHistory() {
   const session = current();
   if (!session) { messages = []; paintChat(); return; }
   const turns = await attempt(() => api(`/sessions/${encodeURIComponent(session.name)}/history`));
+  // For a linked session the server replays the CLI's own transcript, so this
+  // is the whole conversation — including anything said in a terminal before
+  // the console existed — and `steps` are the tool calls under each reply.
   messages = (turns || []).map((t) => ({
     role: t.role === 'user' ? 'user' : 'agent',
     name: t.role === 'user' ? 'You' : t.session,
     text: t.text,
     at: t.at,
     failed: t.failed,
+    activity: t.steps || [],
+    source: t.source,
   }));
   paintChat();
 }

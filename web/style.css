@@ -628,3 +628,13 @@ dialog input { margin-bottom: 12px; }
   .rail { max-height: 30vh; border-right: none; border-bottom: 1px solid var(--line); }
   .term.no-rail { grid-template-rows: 0 minmax(0, 1fr); }
 }
+
+/* Marks a transcript the console is replaying from disk rather than from its
+   own table — which is why it can contain turns this browser never sent. */
+.from-cli {
+  color: var(--ink-faint);
+  font-size: 10.5px;
+  padding: 2px 0 6px;
+  border-bottom: 1px dashed var(--line);
+  margin-bottom: 6px;
+}

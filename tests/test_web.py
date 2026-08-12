@@ -25,7 +25,7 @@ EXPORTS = [
     "detailOf", "renderMarkdown", "safeHref",
     "streamLine", "streamLines",
     "replyFromEvents", "chatActivity", "chatBubble", "chatTranscript",
-    "chatRail", "chatHeader", "chatStatus", "chatIntent", "sessionForm",
+    "chatRail", "chatHeader", "chatStatus", "chatIntent", "sessionForm", "railCount",
     "cliLink", "cliSessionList",
     "b64uEncode", "b64uDecode", "sealedEnvelope", "parseEnvelope", "hex",
     "sealedFrames",
@@ -652,3 +652,30 @@ def test_clicking_the_delete_control_does_not_also_select_the_row():
     # The delete branch returns before the select branch is reached.
     assert handler.index("data-del") < handler.index("data-chat")
     assert "return;" in handler
+
+
+def test_a_linked_session_is_not_reported_as_unused(js):
+    """`turns` counts what this console sent. A conversation adopted from a
+    terminal has none of that and a full history on disk, so a bare `0` beside
+    it is a lie the row can avoid telling."""
+    import json as _json
+
+    linked = _json.loads(js.ctx.eval("JSON.stringify(railCount({turns: 0, cli_exists: true}))"))
+    assert linked["label"] == "↻" and "on disk" in linked["title"]
+
+    used = _json.loads(js.ctx.eval("JSON.stringify(railCount({turns: 3}))"))
+    assert used["label"] == "3"
+
+    fresh = _json.loads(js.ctx.eval("JSON.stringify(railCount({turns: 0}))"))
+    assert fresh["label"] == "·"
+
+
+def test_a_replayed_transcript_says_where_it_came_from(js):
+    """Turns this browser never sent need an explanation, once, at the top."""
+    msgs = [{"role": "user", "text": "from a terminal", "source": "cli"}]
+    out = js.ctx.eval(f"String(chatTranscript({json.dumps(msgs)}))")
+    assert "replayed from the Claude Code transcript" in out
+    assert "from a terminal" in out
+    # The console's own turns get no such banner.
+    own = js.ctx.eval(f"String(chatTranscript({json.dumps([{'role': 'user', 'text': 'hi'}])}))")
+    assert "replayed" not in own

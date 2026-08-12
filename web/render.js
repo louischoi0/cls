@@ -374,6 +374,12 @@ function chatBubble(msg) {
 }
 
 function chatTranscript(messages) {
+  if (messages && messages.length && messages[0].source === 'cli') {
+    // The console is showing the CLI's record, not its own. Worth one line:
+    // it explains why turns exist that this browser never sent.
+    return html`<div class="from-cli">↻ replayed from the Claude Code transcript on disk</div>`
+      + messages.map(chatBubble).join('');
+  }
   if (!messages || !messages.length) {
     return html`
       <div class="term-splash">
@@ -391,6 +397,23 @@ function chatTranscript(messages) {
       </div>`;
   }
   return messages.map(chatBubble).join('');
+}
+
+/** What the count column says about a session.
+ *
+ * `turns` is the console's own tally, and for a linked session it is not the
+ * conversation's length — `claude` has the whole thing on disk and the console
+ * may have sent none of it. Showing a bare `0` beside a conversation with
+ * years of history in it is a lie the row can avoid telling.
+ */
+function railCount(s) {
+  if (s.turns) {
+    return { label: String(s.turns), title: `${s.turns} turn(s) sent from this console` };
+  }
+  if (s.cli_exists) {
+    return { label: '↻', title: 'Linked to an existing conversation on disk' };
+  }
+  return { label: '·', title: 'Nothing said yet' };
 }
 
 /** The conversation list down the side. One row per session.
@@ -413,7 +436,7 @@ function chatRail(sessions, selected) {
         <span class="rail-meta">
           ${s.busy || s.queue_depth
             ? raw(html`<span class="dot busy" title="running"></span>`)
-            : raw(html`<span class="rail-turns">${s.turns || 0}</span>`)}
+            : raw(html`<span class="rail-turns" title="${railCount(s).title}">${railCount(s).label}</span>`)}
         </span>
       </button>
       <button type="button" class="icon-btn rail-del" data-del="${s.name}"

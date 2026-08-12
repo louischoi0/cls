@@ -559,10 +559,46 @@ def create_app(
     # -- chat ---------------------------------------------------------------
 
     @app.get("/sessions/{name}/history", response_model=list[Turn])
-    async def history(request: Request, name: str, limit: int = HISTORY_LIMIT) -> list[Turn]:
+    async def history(
+        request: Request,
+        name: str,
+        limit: int = HISTORY_LIMIT,
+        source: str = "auto",
+    ) -> list[Turn]:
+        """The conversation so far, oldest first.
+
+        Two records exist and they are not equals. `claude` writes every turn to
+        the CLI transcript, including the ones this console sent, so for a
+        linked session that file is the **whole** conversation — everything said
+        in a terminal before the console ever saw it included. The console's own
+        table only has what went through here.
+
+        So `auto` prefers the transcript whenever there is one, and falls back
+        to the table for a session that has not run yet. `cli` and `console`
+        pin the choice, which is how the two can be compared.
+        """
         st: AppState = request.app.state.cc
-        _session_or_404(st, name)
-        return st.store.history(name, limit=max(1, min(limit, 1000)))
+        config = _session_or_404(st, name)
+        limit = max(1, min(limit, 1000))
+
+        session_id = st.session_ids.get(name)
+        if source in ("auto", "cli") and session_id:
+            path = clisessions.path_for(session_id, config.cwd)
+            if path.is_file():
+                return [
+                    Turn(
+                        session=name,
+                        role="user" if turn.role == "user" else "agent",
+                        text=turn.text,
+                        at=turn.at,
+                        steps=turn.steps,
+                        source="cli",
+                    )
+                    for turn in clisessions.read_turns(path, limit=limit)
+                ]
+        if source == "cli":
+            return []
+        return st.store.history(name, limit=limit)
 
     @app.delete("/sessions/{name}/history")
     async def clear_history(request: Request, name: str) -> dict:

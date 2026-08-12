@@ -153,6 +153,13 @@ class ChatAccepted(BaseModel):
     session: str
 
 
+class TurnStep(BaseModel):
+    """One thing a reply did on the way to being written."""
+
+    kind: str
+    text: str
+
+
 class Turn(BaseModel):
     """One line of a transcript, as the console replays it."""
 
@@ -160,10 +167,19 @@ class Turn(BaseModel):
     session: str
     role: Role
     text: str
-    at: datetime
+    #: A turn read back from a CLI transcript may predate any timestamp the
+    #: record carried, so this is optional rather than invented.
+    at: datetime | None = None
     #: ties a user turn to the reply that answered it, and both to the live feed
     message_id: str | None = None
     failed: bool = False
+    #: The tool calls under a reply. Empty for anything the console recorded
+    #: itself — it keeps the words, and the live feed carries the steps.
+    steps: list[TurnStep] = []
+    #: Which record this came from: the console's own table, or the CLI's
+    #: transcript on disk. The two differ in what they can show, so a reader
+    #: (and a test) should be able to tell them apart.
+    source: Literal["console", "cli"] = "console"
 
 
 class MessageRecord(BaseModel):

@@ -254,3 +254,126 @@ def test_a_session_with_no_conversation_yet_says_so(client, home: Path):
     assert made["session_id"] is None
     assert made["cli_exists"] is False
     assert made["cli_path"] is None
+
+
+# -- replaying a CLI transcript ---------------------------------------------
+
+
+def write_conversation(root: Path, cwd: str, session_id: str, records: list) -> Path:
+    project = root / clisessions.project_dir_name(cwd)
+    project.mkdir(parents=True, exist_ok=True)
+    path = project / f"{session_id}.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return path
+
+
+def convo(cwd="/home/x/work"):
+    """The record shapes `claude` actually writes, in the order it writes them."""
+    return [
+        {"type": "user", "cwd": cwd, "timestamp": "2026-08-12T02:00:00.000Z",
+         "message": {"role": "user", "content": "what is in this repo?"}},
+        {"type": "assistant", "timestamp": "2026-08-12T02:00:01.000Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "thinking", "thinking": "hmm"},
+             {"type": "tool_use", "name": "Read", "input": {"file_path": "/etc/hosts"}}]}},
+        # A tool result comes back as a *user* record. It is not a user turn.
+        {"type": "user", "timestamp": "2026-08-12T02:00:02.000Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "t1",
+              "content": "total 92\ndrwxrwxr-x 10 cdkbs cdkbs"}]}},
+        {"type": "assistant", "timestamp": "2026-08-12T02:00:03.000Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "text", "text": "A server and a console."}]}},
+    ]
+
+
+def test_a_transcript_reads_back_as_turns(cli_root: Path):
+    path = write_conversation(cli_root, "/home/x/work", SESSION_A, convo())
+    turns = clisessions.read_turns(path)
+    assert [t.role for t in turns] == ["user", "agent"]
+    assert turns[0].text == "what is in this repo?"
+    assert turns[1].text == "A server and a console."
+
+
+def test_a_tool_result_is_not_mistaken_for_something_a_person_said(cli_root: Path):
+    """`user` names two different things in this format. Treating the second as
+    a turn puts `total 92 drwxrwxr-x ...` on screen as if it were typed."""
+    path = write_conversation(cli_root, "/home/x/work", SESSION_A, convo())
+    turns = clisessions.read_turns(path)
+    assert not any("drwx" in t.text for t in turns)
+    assert len([t for t in turns if t.role == "user"]) == 1
+
+
+def test_the_steps_under_a_reply_are_kept(cli_root: Path):
+    path = write_conversation(cli_root, "/home/x/work", SESSION_A, convo())
+    steps = clisessions.read_turns(path)[1].steps
+    assert [s.kind for s in steps] == ["thinking", "tool", "tool_result"]
+    assert steps[1].text == "Read(/etc/hosts)"
+
+
+def test_a_turn_carries_the_time_it_happened(cli_root: Path):
+    path = write_conversation(cli_root, "/home/x/work", SESSION_A, convo())
+    assert clisessions.read_turns(path)[0].at.year == 2026
+
+
+def test_the_limit_keeps_the_end_of_the_conversation(cli_root: Path):
+    records = []
+    for i in range(20):
+        records.append({"type": "user", "cwd": "/home/x/work",
+                        "message": {"role": "user", "content": f"q{i}"}})
+        records.append({"type": "assistant",
+                        "message": {"role": "assistant",
+                                    "content": [{"type": "text", "text": f"a{i}"}]}})
+    path = write_conversation(cli_root, "/home/x/work", SESSION_A, records)
+    turns = clisessions.read_turns(path, limit=4)
+    assert [t.text for t in turns] == ["q18", "a18", "q19", "a19"]
+
+
+def test_an_empty_or_broken_transcript_is_no_turns(cli_root: Path):
+    path = write_conversation(cli_root, "/home/x/work", SESSION_A, [])
+    assert clisessions.read_turns(path) == []
+    path.write_text("not json\n{}\n", encoding="utf-8")
+    assert clisessions.read_turns(path) == []
+    assert clisessions.read_turns(cli_root / "nope.jsonl") == []
+
+
+def test_a_linked_session_replays_the_transcript(client, cli_root: Path, home: Path):
+    """The whole point of the question: turns said in a terminal, before this
+    console existed, show up in it."""
+    write_conversation(cli_root, str(home / "work"), SESSION_A, convo(str(home / "work")))
+    client.post("/sessions", json={"name": "alpha", "cwd": str(home / "work"),
+                                   "session_id": SESSION_A}, headers=AUTH)
+    body = client.get("/sessions/alpha/history", headers=AUTH).json()
+    assert [t["text"] for t in body] == ["what is in this repo?", "A server and a console."]
+    assert {t["source"] for t in body} == {"cli"}
+    assert body[1]["steps"][1]["text"] == "Read(/etc/hosts)"
+
+
+def test_the_console_s_own_record_can_still_be_asked_for(client, cli_root: Path, home: Path):
+    write_conversation(cli_root, str(home / "work"), SESSION_A, convo(str(home / "work")))
+    client.post("/sessions", json={"name": "alpha", "cwd": str(home / "work"),
+                                   "session_id": SESSION_A}, headers=AUTH)
+    client.post("/sessions/alpha/messages", json={"text": "queued here"}, headers=AUTH)
+
+    console = client.get("/sessions/alpha/history?source=console", headers=AUTH).json()
+    assert [t["text"] for t in console] == ["queued here"]
+    assert {t["source"] for t in console} == {"console"}
+    # ...and the transcript on disk does not know about it yet, because the run
+    # has not happened.
+    cli = client.get("/sessions/alpha/history?source=cli", headers=AUTH).json()
+    assert "queued here" not in [t["text"] for t in cli]
+
+
+def test_a_session_with_no_transcript_falls_back_to_the_console(client, home: Path):
+    client.post("/sessions", json={"name": "alpha", "cwd": str(home / "work")},
+                headers=AUTH)
+    client.post("/sessions/alpha/messages", json={"text": "hello"}, headers=AUTH)
+    body = client.get("/sessions/alpha/history", headers=AUTH).json()
+    assert [t["text"] for t in body] == ["hello"]
+    assert body[0]["source"] == "console"
+
+
+def test_asking_for_cli_history_that_is_not_there_is_empty_not_a_guess(client, home: Path):
+    client.post("/sessions", json={"name": "alpha", "cwd": str(home / "work")},
+                headers=AUTH)
+    assert client.get("/sessions/alpha/history?source=cli", headers=AUTH).json() == []
