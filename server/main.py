@@ -58,6 +58,7 @@ class ConsoleFiles(StaticFiles):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
 
+from . import clisessions
 from .dispatcher import Dispatcher
 from .logstore import LogStore, LogStoreError
 from .models import (
@@ -73,7 +74,7 @@ from .models import (
 )
 from .pool import AgentPool
 from .registry import Registry, RegistryError
-from .runner import AgentWorker, Job, SessionIds, resolve_claude_bin
+from .runner import AgentWorker, Job, SessionIds, SessionIdTaken, resolve_claude_bin
 from .sealed import AUTH_HEADER, SEALED_HEADER, SealError, SealedSession
 from .sessions import SessionStore, SessionStoreError
 
@@ -223,6 +224,18 @@ class AppState:
     def info(self, config: SessionConfig, counts: dict) -> SessionInfo:
         turns, last_at = counts.get(config.name, (0, None))
         worker = self.workers.get(config.name)
+        # The 1:1 link, resolved rather than assumed: the id this session holds,
+        # where `claude` files that conversation, and whether it is there yet.
+        session_id = self.session_ids.get(config.name)
+        cli_path = cli_title = None
+        cli_exists = False
+        if session_id:
+            path = clisessions.path_for(session_id, config.cwd)
+            cli_path = str(path)
+            cli_exists = path.is_file()
+            if cli_exists:
+                found = clisessions.read_session(path)
+                cli_title = found.title if found else None
         return SessionInfo(
             name=config.name,
             cwd=str(config.cwd),
@@ -233,11 +246,14 @@ class AppState:
             max_budget_usd=config.max_budget_usd,
             timeout_s=config.timeout_s,
             created_at=config.created_at,
-            session_id=self.session_ids.get(config.name),
+            session_id=session_id,
             queue_depth=self.dispatcher.depth(config.name),
             busy=bool(worker and worker.busy),
             turns=turns,
             last_at=last_at,
+            cli_path=cli_path,
+            cli_exists=cli_exists,
+            cli_title=cli_title,
         )
 
 
@@ -461,12 +477,34 @@ def create_app(
             )
         # The store decides whether the name is free — it is the record, and a
         # registry that disagreed with it would only be found on the next boot.
+        if body.session_id:
+            found = clisessions.find(body.session_id)
+            if found is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"no Claude Code conversation {body.session_id} on this machine",
+                )
+            owner = st.session_ids.owner_of(body.session_id)
+            if owner is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"that conversation already belongs to {owner!r}",
+                )
         st.store.create(config)
         try:
             st.pool.add(config)
         except RegistryError as exc:
             st.store.delete(config.name)
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if body.session_id:
+            # Bound after the session exists, so a rejected create cannot leave
+            # a conversation claimed by a name that is not there.
+            try:
+                st.session_ids.set(config.name, body.session_id)
+            except SessionIdTaken as exc:
+                await st.pool.remove(config.name)
+                st.store.delete(config.name)
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         log.info("created session %s", config.name, extra={"session": config.name})
         return st.info(config, st.store.counts())
 
@@ -501,8 +539,22 @@ def create_app(
             )
         await st.pool.remove(name)
         st.store.delete(name)
+        # The `.jsonl` stays: it is the CLI's, and `claude --resume` can still
+        # reach it. Releasing the binding is what lets it be adopted again.
+        st.session_ids.release(name)
         log.info("deleted session %s", name, extra={"session": name})
         return Response(status_code=204)
+
+    @app.get("/cli-sessions", response_model=list[clisessions.CliSession])
+    async def list_cli_sessions(request: Request) -> list[clisessions.CliSession]:
+        """Every Claude Code conversation on this machine, newest first.
+
+        Each says which console session owns it; `owner: null` is one you
+        started in a terminal, which `POST /sessions` can adopt by id.
+        """
+        st: AppState = request.app.state.cc
+        owners = {sid: name for name, sid in st.session_ids.as_dict().items()}
+        return clisessions.scan(owners=owners)
 
     # -- chat ---------------------------------------------------------------
 

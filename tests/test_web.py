@@ -20,21 +20,13 @@ AUTH = {"X-API-Key": KEY}
 
 WEB = PROJECT_ROOT / "web"
 
-AGENTS_YAML = """
-agents:
-  - name: alpha
-    tags: [research]
-    cwd: {cwd}
-    allowed_tools: [Read]
-    permission_mode: bypassPermissions
-"""
-
 EXPORTS = [
     "esc", "raw", "render", "html", "ago", "truncate", "csv", "money",
     "detailOf", "renderMarkdown", "safeHref",
     "streamLine", "streamLines",
     "replyFromEvents", "chatActivity", "chatBubble", "chatTranscript",
-    "chatRail", "chatHeader", "chatIntent", "sessionForm",
+    "chatRail", "chatHeader", "chatStatus", "chatIntent", "sessionForm",
+    "cliLink", "cliSessionList",
     "b64uEncode", "b64uDecode", "sealedEnvelope", "parseEnvelope", "hex",
     "sealedFrames",
 ]
@@ -95,10 +87,11 @@ def test_every_id_app_js_reaches_for_is_defined_somewhere():
 
 
 def test_the_page_is_one_view_with_no_router():
-    """The console is a chat window, not a site: no hash routes, no nav."""
+    """The console is a terminal, not a site: no hash routes, no nav, no top bar."""
     page = (WEB / "index.html").read_text(encoding="utf-8")
-    assert "<nav" not in page
+    assert "<nav" not in page and "topbar" not in page
     assert 'id="chat-log"' in page and 'id="rail-list"' in page
+    assert 'class="statusline"' in page
 
 
 def test_the_stylesheet_is_not_silently_broken():
@@ -365,10 +358,11 @@ def test_a_hostile_session_name_cannot_break_out_of_the_rail(js):
 
 
 def test_my_turn_and_theirs_are_told_apart(js):
+    """The CLI's own markers: `>` for what you typed, `⏺` for the reply."""
     mine = js("chatBubble", {"role": "user", "text": "hi"})
     theirs = js("chatBubble", {"role": "agent", "name": "alpha", "text": "hello"})
-    assert "chat-msg mine" in mine and "You" in mine
-    assert "chat-msg theirs" in theirs and "alpha" in theirs
+    assert "turn mine" in mine and ">" in mine and "you" in mine
+    assert "turn theirs" in theirs and "\u23fa" in theirs and "alpha" in theirs
 
 
 def test_a_pending_reply_with_nothing_said_yet_shows_a_caret(js):
@@ -381,7 +375,7 @@ def test_a_pending_reply_with_nothing_said_yet_shows_a_caret(js):
 
 def test_an_empty_transcript_says_the_session_still_remembers(js):
     out = js.ctx.eval("String(chatTranscript([]))")
-    assert "empty" in out and "remembers" in out
+    assert "remember" in out and "Welcome" in out
 
 
 def test_the_rail_marks_the_selected_session(js):
@@ -389,15 +383,15 @@ def test_the_rail_marks_the_selected_session(js):
     import re
 
     out = js.ctx.eval(f"chatRail({json.dumps(sessions)}, 'b')")
-    assert out.count("chat-rail-row") == 2
+    assert out.count("rail-row") == 2
     # The `on` class and `data-chat` are separated by a line break in the
     # template, so this asserts the pairing rather than a literal substring.
-    selected = re.findall(r'class="chat-rail-row (on)?"\s+data-chat="(\w+)"', out)
+    selected = re.findall(r'class="rail-row (on)?"\s+data-chat="(\w+)"', out)
     assert selected == [(None, "a"), ("on", "b")] or selected == [("", "a"), ("on", "b")]
 
 
 def test_an_empty_rail_points_at_the_way_to_fill_it(js):
-    assert "New" in js.ctx.eval("String(chatRail([], ''))")
+    assert "new" in js.ctx.eval("String(chatRail([], ''))")
 
 
 def test_a_busy_session_is_marked_in_the_rail(js):
@@ -412,7 +406,7 @@ def test_the_header_shows_where_a_session_runs_and_what_it_may_use(js):
         "session_id": "0123456789abcdef",
     }
     out = js("chatHeader", session)
-    assert "/home/x/work" in out and "Read, Grep" in out and "claude-opus-5" in out
+    assert "/home/x/work" in out and "Read Grep" in out and "claude-opus-5" in out
     assert "chat-delete" in out and "chat-clear" in out
 
 
@@ -429,7 +423,7 @@ def test_the_intent_line_explains_what_enter_will_do(js):
     session = {"name": "alpha", "busy": False, "queue_depth": 0}
     out = json.loads(js.ctx.eval(
         f"JSON.stringify(chatIntent('hello', {json.dumps(session)}))"))
-    assert out["ok"] is True and "Enter sends" in out["hint"]
+    assert out["ok"] is True and "send" in out["hint"]
 
 
 def test_a_busy_session_says_the_turn_will_queue(js):
@@ -456,3 +450,92 @@ def test_the_activity_trace_is_collapsed_unless_it_is_all_there_is(js):
     assert "open" not in js.ctx.eval(f"String(chatActivity({json.dumps(events)}, false))")
     assert "open" in js.ctx.eval(f"String(chatActivity({json.dumps(events)}, true))")
     assert js.ctx.eval("String(chatActivity([], false))") == ""
+
+
+def test_the_status_line_says_what_is_true_right_now(js):
+    session = {"name": "alpha", "busy": False, "turns": 4, "queue_depth": 0,
+               "session_id": "0123456789abcdef"}
+    out = js.ctx.eval(f"String(chatStatus({json.dumps(session)}, [{json.dumps(session)}]))")
+    assert "alpha" in out and "idle" in out and "4 turns" in out
+    assert "0123456…" in out     # the resumable id, shortened to 8 columns
+
+
+def test_a_running_session_says_so_in_the_status_line(js):
+    session = {"name": "alpha", "busy": True, "turns": 1, "queue_depth": 2}
+    out = js.ctx.eval(f"String(chatStatus({json.dumps(session)}, []))")
+    assert "running" in out and "queued 2" in out
+
+
+def test_the_status_line_without_a_session_counts_them(js):
+    out = js.ctx.eval("String(chatStatus(null, [{name:'a'},{name:'b'}]))")
+    assert "2 sessions" in out
+
+
+def test_a_hostile_session_name_cannot_break_out_of_the_status_line(js):
+    session = {"name": "<script>alert(1)</script>", "turns": 0}
+    out = js.ctx.eval(f"String(chatStatus({json.dumps(session)}, []))")
+    assert "<script>" not in out
+
+
+def test_every_icon_button_is_labelled():
+    """An icon with no accessible name is a mystery box to a screen reader."""
+    import re
+
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    for tag in re.findall(r"<button[^>]*class=\"[^\"]*icon-btn[^\"]*\"[^>]*>", page):
+        assert "aria-label=" in tag, tag
+
+
+def test_icon_buttons_are_centred_on_both_axes():
+    """Their glyphs (+, ⏎, ◐, ⚿, ▚) have different optical centres, so
+    line-height alone leaves each sitting at a different height."""
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    rule = css.split(".icon-btn {")[1].split("}")[0]
+    assert "inline-flex" in rule
+    assert "align-items: center" in rule
+    assert "justify-content: center" in rule
+
+
+def test_the_cli_link_shows_the_conversation_it_resumes(js):
+    session = {"name": "a", "cwd": "/tmp", "session_id": "66798295-26f4-45f9",
+               "cli_exists": True, "cli_path": "/home/x/.claude/projects/-tmp/66798295.jsonl",
+               "cli_title": "Some chat"}
+    out = js("cliLink", session)
+    assert "claude --resume 66798295-26f4-45f9" in out   # the copyable command
+    assert "cli-link on" in out
+    assert "6679829…" in out
+
+
+def test_a_session_that_has_not_run_yet_reads_as_unlinked(js):
+    out = js("cliLink", {"name": "a", "cwd": "/tmp", "session_id": None})
+    assert "unlinked" in out and "cli-link none" in out
+
+
+def test_a_bound_conversation_with_no_file_yet_is_marked_pending(js):
+    out = js("cliLink", {"name": "a", "session_id": "abc", "cli_exists": False})
+    assert "cli-link pending" in out
+
+
+def test_the_link_list_offers_only_unowned_conversations(js):
+    rows = [
+        {"session_id": "aaa", "cwd": "/home/x/one", "title": "One",
+         "modified_at": "2026-08-12T00:00:00Z", "path": "/p/aaa.jsonl", "owner": None},
+        {"session_id": "bbb", "cwd": "/home/x/two", "title": "Two",
+         "modified_at": "2026-08-12T00:00:00Z", "path": "/p/bbb.jsonl", "owner": "alpha"},
+    ]
+    out = js.ctx.eval(f"String(cliSessionList({json.dumps(rows)}))")
+    assert 'data-adopt="aaa"' in out
+    assert "bbb" not in out          # already 1:1 with a console session
+
+
+def test_nothing_to_link_says_so(js):
+    rows = [{"session_id": "a", "cwd": "/x", "modified_at": "2026-08-12T00:00:00Z",
+             "path": "/p", "owner": "alpha"}]
+    assert "linked" in js.ctx.eval(f"String(cliSessionList({json.dumps(rows)}))")
+
+
+def test_a_hostile_cli_title_cannot_break_out_of_the_link_list(js):
+    rows = [{"session_id": "a", "cwd": "/x", "title": "<script>alert(1)</script>",
+             "modified_at": "2026-08-12T00:00:00Z", "path": "/p", "owner": None}]
+    out = js.ctx.eval(f"String(cliSessionList({json.dumps(rows)}))")
+    assert "<script>" not in out

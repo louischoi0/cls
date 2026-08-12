@@ -278,25 +278,33 @@ function sealedFrames(text) {
 // chat
 // --------------------------------------------------------------------------
 
-/* The Terminal page is a chat transcript, not a command line. What differs
- * from the console it replaced: a turn is a bubble rather than an echoed line,
- * the agent is chosen once instead of re-addressed with `@name` every time, and
- * a run's live output lands inside the bubble it belongs to rather than in a
- * shared scrollback.
+/* The console is shaped like the Claude Code CLI, because that is literally
+ * what is on the other end of it. Monospace throughout, no bubbles, no
+ * max-width: a turn runs the full width of the pane the way it does in a
+ * terminal, and the eye finds one by its marker rather than by its alignment.
  *
- * `parseCommand` still runs on what is typed, so `@name` and `#tag` keep
- * working for anyone with the muscle memory — they just override the picker
- * for one turn instead of being the only way to address anything.
+ * The vocabulary is the CLI's, so the two read the same way:
+ *
+ *   > what you typed          a user turn, quiet
+ *   ⏺ what it said            a reply
+ *     ⎿ Read(/etc/hosts)      what it did to get there
  */
 
-//: The glyph opening an activity line. Text events are the reply itself and
-//: never appear here, which is why `text` is absent rather than blank.
-const CHAT_MARKS = {
-  start: '▶', notice: '·', thinking: '…',
-  tool: '⚙', tool_result: '↩', result: '■', end: '□',
+//: Opens a turn. `>` is the prompt you type at; `⏺` is the CLI's own bullet.
+const PS_USER = '>';
+const PS_AGENT = '⏺';
+
+//: Opens an activity line — the CLI's tree connector, so a tool call under a
+//: reply looks like a tool call under a reply.
+const TRACE_MARK = '⎿';
+
+//: What each activity line is called, since the connector no longer says.
+const CHAT_KINDS = {
+  start: 'start', notice: 'init', thinking: 'thinking',
+  tool: 'tool', tool_result: 'result', result: 'done', end: 'end',
 };
 
-/** A run's events -> what one agent bubble shows.
+/** A run's events -> what one turn shows.
  *
  * Text events are the reply; everything else is activity, kept but folded away
  * so a long tool trace cannot bury the two sentences that were asked for.
@@ -323,44 +331,64 @@ function replyFromEvents(events) {
 /** The activity trace under a reply. Collapsed: it is context, not the answer. */
 function chatActivity(events, open) {
   if (!events || !events.length) return '';
+  const last = events[events.length - 1];
   return html`
-    <details class="chat-activity" ${open ? raw('open') : ''}>
-      <summary>${events.length} step${events.length === 1 ? '' : 's'}</summary>
+    <details class="trace" ${open ? raw('open') : ''}>
+      <summary>
+        <span class="trace-mark">${TRACE_MARK}</span>
+        <span class="trace-summary">${last && last.text ? truncate(last.text, 56) : 'steps'}</span>
+        <span class="trace-count">${events.length}</span>
+      </summary>
       ${events.map((event) => html`
-        <div class="chat-act ${event.kind}">
-          <span class="smark">${CHAT_MARKS[event.kind] === undefined ? '·' : CHAT_MARKS[event.kind]}</span>
-          <span class="stext">${event.text}</span>
+        <div class="trace-line ${event.kind}">
+          <span class="trace-kind">${CHAT_KINDS[event.kind] || event.kind}</span>
+          <span class="trace-text">${event.text}</span>
         </div>`)}
     </details>`;
 }
 
-/** One turn. `pending` is a reply still arriving; `failed` one that did not land. */
+/** One turn, as a terminal block. `pending` is a reply still arriving. */
 function chatBubble(msg) {
   const mine = msg.role === 'user';
-  const who = mine ? 'You' : (msg.name || 'agent');
   const classes = [
-    'chat-msg', mine ? 'mine' : 'theirs',
+    'turn', mine ? 'mine' : 'theirs',
     msg.failed ? 'failed' : '', msg.pending ? 'pending' : '',
   ].filter(Boolean).join(' ');
-  // A pending reply with nothing said yet gets the caret, so the wait has a
-  // visible subject rather than looking like a dropped message.
+  // A pending reply with nothing said yet gets the block caret, so the wait has
+  // a visible subject rather than looking like a dropped message.
   const body = msg.text
-    ? html`<div class="chat-text">${msg.text}</div>`
-    : (msg.pending ? html`<div class="chat-text caret">▍</div>` : '');
+    ? html`<div class="turn-text">${msg.text}</div>`
+    : (msg.pending ? html`<div class="turn-text caret">█</div>` : '');
   return html`
     <div class="${classes}" ${msg.id ? raw(`data-msg="${esc(msg.id)}"`) : ''}>
-      <div class="chat-who">
-        <span>${who}</span>
-        ${msg.at ? raw(html`<span class="faint">${ago(msg.at)}</span>`) : ''}
+      <div class="turn-gutter" aria-hidden="true">${mine ? PS_USER : PS_AGENT}</div>
+      <div class="turn-body">
+        <div class="turn-meta">
+          <span class="turn-who">${mine ? 'you' : (msg.name || 'agent')}</span>
+          ${msg.at ? raw(html`<span class="turn-at">${ago(msg.at)}</span>`) : ''}
+        </div>
+        ${body}
+        ${raw(chatActivity(msg.activity, msg.pending && !msg.text))}
       </div>
-      ${body}
-      ${raw(chatActivity(msg.activity, msg.pending && !msg.text))}
     </div>`;
 }
 
 function chatTranscript(messages) {
   if (!messages || !messages.length) {
-    return html`<p class="empty">Nothing said yet. The agent keeps its own session, so it remembers earlier conversations even when this panel is empty.</p>`;
+    return html`
+      <div class="term-splash">
+        <div class="term-banner">
+          <span class="term-spark">✻</span>
+          <div>
+            <div class="term-banner-line">Welcome to <strong>cls</strong></div>
+            <div class="term-banner-sub">a chat console for Claude Code sessions</div>
+          </div>
+        </div>
+        <p class="term-tip">
+          The session keeps its own memory, so it may still remember
+          conversations this pane never saw.
+        </p>
+      </div>`;
   }
   return messages.map(chatBubble).join('');
 }
@@ -368,39 +396,103 @@ function chatTranscript(messages) {
 /** The conversation list down the side. One row per session. */
 function chatRail(sessions, selected) {
   if (!sessions || !sessions.length) {
-    return html`<p class="empty">No sessions yet. <strong>New</strong> makes one.</p>`;
+    return html`<p class="empty">No sessions. <strong>+ new</strong> makes one.</p>`;
   }
   return sessions.map((s) => html`
-    <button type="button" class="chat-rail-row ${s.name === selected ? 'on' : ''}"
+    <button type="button" class="rail-row ${s.name === selected ? 'on' : ''}"
             data-chat="${s.name}" title="${s.cwd}">
-      <span class="chat-rail-name">${s.name}</span>
-      <span class="chat-rail-sub faint">
-        ${s.busy ? 'replying…' : (s.turns ? `${s.turns} turn${s.turns === 1 ? '' : 's'}` : 'never used')}
+      <span class="rail-mark" aria-hidden="true">${s.name === selected ? '▸' : ' '}</span>
+      <span class="rail-name">${s.name}</span>
+      <span class="rail-meta">
+        ${s.busy || s.queue_depth
+          ? raw(html`<span class="dot busy" title="running"></span>`)
+          : raw(html`<span class="rail-turns">${s.turns || 0}</span>`)}
       </span>
-      ${s.busy || s.queue_depth ? raw(html`<span class="dot busy" title="running"></span>`) : ''}
     </button>`).join('');
 }
 
-/** The header over the transcript: who this is, where it runs, what it may use. */
+/** The title line over the transcript: who this is, and what it may do. */
 function chatHeader(session) {
   if (!session) return '';
   const tools = session.allowed_tools && session.allowed_tools.length
-    ? session.allowed_tools.join(', ')
+    ? session.allowed_tools.join(' ')
     : 'no tools';
   return html`
-    <div class="chat-head">
-      <div>
-        <h2>${session.name}</h2>
-        <p class="chat-head-sub faint mono">${session.cwd} · ${tools}${session.model ? ` · ${session.model}` : ''}</p>
-      </div>
-      <div class="chat-head-actions">
-        <span class="faint mono" title="The Claude Code session id this resumes">
-          ${session.session_id ? truncate(session.session_id, 8) : 'no session yet'}
-        </span>
-        <button type="button" class="ghost" id="chat-clear" title="Forget this transcript. The session itself keeps its memory.">Clear</button>
-        <button type="button" class="ghost danger" id="chat-delete" title="Delete the session and everything it said">Delete</button>
-      </div>
+    <div class="term-title">
+      <span class="term-title-name">${session.name}</span>
+      <span class="term-title-path" title="${session.cwd}">${session.cwd}</span>
+      <span class="term-title-spacer"></span>
+      <span class="term-title-tools" title="What this session may use">${tools}</span>
+      ${session.model ? raw(html`<span class="term-title-model">${session.model}</span>`) : ''}
+      ${raw(cliLink(session))}
+      <button type="button" class="linkish" id="chat-clear" title="Forget this transcript. The session itself keeps its memory.">clear</button>
+      <button type="button" class="linkish danger" id="chat-delete" title="Delete the session and everything it said">rm</button>
     </div>`;
+}
+
+/** The one Claude Code conversation this session is.
+ *
+ * The mapping is 1:1 and the console should be able to prove it rather than
+ * imply it: this is the id `--resume` is given and the file `claude` writes it
+ * to, both resolved server-side. "unlinked" is a session that has not run yet —
+ * the id is minted on the first turn.
+ */
+function cliLink(session) {
+  if (!session || !session.session_id) {
+    return html`<span class="cli-link none" title="A conversation is created on the first turn">unlinked</span>`;
+  }
+  const attach = `claude --resume ${session.session_id}`;
+  const where = session.cli_path || '(not written yet)';
+  return html`
+    <button type="button" class="cli-link ${session.cli_exists ? 'on' : 'pending'}"
+            data-copy="${attach}"
+            title="${session.cli_title ? `${session.cli_title}\n` : ''}${where}\n\nclick to copy: ${attach}">
+      <span class="cli-dot" aria-hidden="true">${session.cli_exists ? '◆' : '◇'}</span>
+      ${truncate(session.session_id, 8)}
+    </button>`;
+}
+
+/** Claude Code conversations on this machine that nothing here is driving. */
+function cliSessionList(sessions) {
+  const free = (sessions || []).filter((s) => !s.owner);
+  if (!free.length) {
+    return html`<p class="empty">Every local conversation is linked.</p>`;
+  }
+  return free.map((s) => html`
+    <button type="button" class="cli-row" data-adopt="${s.session_id}"
+            data-cwd="${s.cwd || ''}"
+            title="${s.path}">
+      <span class="cli-row-title">${s.title || s.last_prompt || s.session_id}</span>
+      <span class="cli-row-sub">${s.cwd || 'unknown cwd'} · ${ago(s.modified_at)}</span>
+    </button>`).join('');
+}
+
+/** The status line along the bottom: what is true right now, in one row. */
+function chatStatus(session, sessions) {
+  const count = (sessions || []).length;
+  if (!session) {
+    return html`<span class="stat-key">cls</span><span class="stat">${count} session${count === 1 ? '' : 's'}</span>`;
+  }
+  return html`
+    <span class="stat-key">${session.name}</span>
+    <span class="stat">${session.busy ? 'running' : 'idle'}</span>
+    ${session.queue_depth ? raw(html`<span class="stat">queued ${session.queue_depth}</span>`) : ''}
+    <span class="stat">${session.turns || 0} turns</span>
+    <span class="stat" title="The Claude Code session id this resumes">${session.session_id ? truncate(session.session_id, 8) : 'no session yet'}</span>`;
+}
+
+/** What pressing Enter will do, given who is selected and what is typed. */
+function chatIntent(text, session) {
+  if (!session) return { ok: false, hint: 'Create a session to talk to.' };
+  if (!String(text || '').trim()) {
+    return { ok: false, hint: 'enter ⏎ send · shift+enter newline · ctrl+b sessions' };
+  }
+  if (session.busy || session.queue_depth) {
+    // Turns are serialised per session, so this is a queue position and not a
+    // refusal. Saying so beats a send button that looks like it did nothing.
+    return { ok: true, hint: `${session.name} is busy — this goes on its queue.` };
+  }
+  return { ok: true, hint: 'enter ⏎ send · shift+enter newline · ctrl+b sessions' };
 }
 
 //: What a new session gets when the operator does not say otherwise. Read-only
@@ -411,28 +503,14 @@ const DEFAULT_TOOLS = 'Read, Glob, Grep';
 function sessionForm() {
   return html`
     <form id="new-session" class="session-form">
-      <label>Name <input name="name" placeholder="research" autocomplete="off" spellcheck="false" required></label>
-      <label>Working directory <input name="cwd" class="mono" placeholder="/home/cdkbs/workspaces/research" required></label>
-      <label>Tools <input name="allowed_tools" class="mono" value="${DEFAULT_TOOLS}" placeholder="Read, Glob, Grep"></label>
-      <label>Model <input name="model" class="mono" placeholder="(the CLI default)"></label>
-      <label class="wide">System prompt <textarea name="system_prompt" rows="3" placeholder="Appended to Claude Code's own prompt. Optional."></textarea></label>
-      <div class="row end wide">
-        <button type="button" class="ghost" id="new-cancel">Cancel</button>
-        <button type="submit" class="primary">Create</button>
+      <label>name <input name="name" placeholder="research" autocomplete="off" spellcheck="false" required></label>
+      <label>cwd <input name="cwd" placeholder="/home/cdkbs/workspaces/research" required></label>
+      <label>tools <input name="allowed_tools" value="${DEFAULT_TOOLS}" placeholder="Read, Glob, Grep"></label>
+      <label>model <input name="model" placeholder="(cli default)"></label>
+      <label>system prompt <textarea name="system_prompt" rows="2" placeholder="appended, optional"></textarea></label>
+      <div class="row end">
+        <button type="button" class="linkish" id="new-cancel">cancel</button>
+        <button type="submit" class="primary">create</button>
       </div>
     </form>`;
-}
-
-/** What pressing Enter will do, given who is selected and what is typed. */
-function chatIntent(text, session) {
-  if (!session) return { ok: false, hint: 'Create a session to talk to.' };
-  if (!String(text || '').trim()) {
-    return { ok: false, hint: 'Enter sends · Shift+Enter for a new line' };
-  }
-  if (session.busy || session.queue_depth) {
-    // Turns are serialised per session, so this is a queue position and not a
-    // refusal. Saying so beats a send button that looks like it did nothing.
-    return { ok: true, hint: `${session.name} is busy — this goes on its queue.` };
-  }
-  return { ok: true, hint: 'Enter sends · Shift+Enter for a new line' };
 }

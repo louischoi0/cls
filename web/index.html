@@ -8,39 +8,44 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#9635;</text></svg>">
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="#/">cls<span>chat</span></a>
-    <div class="topbar-right">
-      <span id="pulse" class="pulse" title="idle"></span>
-      <button id="theme" class="icon-btn" title="Toggle theme">◐</button>
-      <button id="keybtn" class="icon-btn" title="API key">⚿</button>
-    </div>
-  </header>
-
-  <!-- Shown only when this browser cannot seal, so a cleartext key is never a
-       silent condition. app.js fills it in; see sealingStatus(). -->
-  <div id="wirewarn" class="wirewarn" hidden></div>
-
-  <main class="chat">
-    <aside class="chat-rail">
-      <div class="chat-rail-head">
-        <span class="faint">Sessions</span>
-        <button type="button" id="rail-new" class="ghost" title="Create a session">New</button>
+  <!-- One screen, edge to edge. The transcript takes the whole viewport minus
+       the prompt box and the status line; nothing else competes for the space. -->
+  <div class="term">
+    <aside class="rail" id="rail">
+      <div class="rail-head">
+        <span class="rail-title">sessions</span>
+        <button type="button" id="rail-new" class="icon-btn" title="New session" aria-label="New session">+</button>
       </div>
       <div id="new-panel" hidden></div>
-      <div id="rail-list"></div>
+      <div id="rail-list" class="rail-list"></div>
     </aside>
 
-    <section class="chat-main">
+    <main class="term-main">
       <div id="chat-header"></div>
-      <div id="chat-log" class="chat-log" aria-live="polite"></div>
-      <div id="composer" class="composer" hidden>
-        <textarea id="say" rows="1" placeholder="Say something…" autocomplete="off"></textarea>
-        <button id="send" class="primary" disabled>Send</button>
-        <div id="chat-hint" class="chat-hint faint"></div>
+      <div id="chat-log" class="term-log" aria-live="polite"></div>
+
+      <!-- The CLI's prompt box: a bordered field with the caret inside it, the
+           hint underneath, and nothing between it and the bottom of the pane. -->
+      <div id="composer" class="prompt-box" hidden>
+        <div class="prompt-field">
+          <span class="prompt-ps" aria-hidden="true">&gt;</span>
+          <textarea id="say" rows="1" placeholder="ask anything" autocomplete="off" spellcheck="false"></textarea>
+          <button id="send" class="icon-btn send" title="Send" aria-label="Send" disabled>⏎</button>
+        </div>
+        <div id="chat-hint" class="prompt-hint"></div>
       </div>
-    </section>
-  </main>
+    </main>
+  </div>
+
+  <div class="statusline">
+    <button type="button" id="rail-toggle" class="icon-btn" title="Toggle sessions (Ctrl+B)" aria-label="Toggle sessions">▚</button>
+    <div id="status-left" class="status-left"></div>
+    <div class="status-right">
+      <span id="pulse" class="pulse" title="idle"></span>
+      <button id="theme" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+      <button id="keybtn" class="icon-btn" title="API key" aria-label="API key">⚿</button>
+    </div>
+  </div>
 
   <div id="toasts" class="toasts"></div>
 

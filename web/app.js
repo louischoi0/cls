@@ -243,19 +243,21 @@ async function attempt(fn, { success } = {}) {
 // key dialog
 // --------------------------------------------------------------------------
 
-/** Say once, visibly, whether the key is about to cross the wire in the clear. */
+/** Whether this page is sealing, said once inside the key dialog.
+ *
+ * There used to be a banner across the top as well. It is gone by request —
+ * `sealingStatus()` still reports the same fact, and a 426 from a
+ * sealing-required server still explains itself, so nothing is silent that
+ * would otherwise fail without a reason.
+ */
 function showWireStatus() {
   const status = sealingStatus();
-  const banner = $('#wirewarn');
-  banner.hidden = status.sealed;
-  banner.textContent = status.sealed ? '' : `Cleartext API key — ${status.why}`;
   const note = $('#keyseal');
-  if (note) {
-    note.textContent = status.sealed
-      ? 'This page seals every request, so the key itself is never sent.'
-      : `Warning: ${status.why}`;
-    note.classList.toggle('reject', !status.sealed);
-  }
+  if (!note) return;
+  note.textContent = status.sealed
+    ? 'This page seals every request, so the key itself is never sent.'
+    : `Note: ${status.why}`;
+  note.classList.toggle('faint', status.sealed);
 }
 
 function openKeyDialog(problem) {
@@ -400,9 +402,14 @@ function paintRail() {
   $('#rail-list').innerHTML = chatRail(sessions, selected);
 }
 
+function paintStatus() {
+  $('#status-left').innerHTML = chatStatus(current(), sessions);
+}
+
 function paintChat() {
   const session = current();
   $('#chat-header').innerHTML = chatHeader(session);
+  paintStatus();
   const log = $('#chat-log');
   const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
   const shown = live ? [...messages, live] : messages;
@@ -429,6 +436,7 @@ async function loadSessions() {
   if (!selected && sessions.length) selected = sessions[0].name;
   localStorage.setItem(SELECTED_STORAGE, selected);
   paintRail();
+  paintStatus();
 }
 
 async function loadHistory() {
@@ -463,6 +471,7 @@ async function send() {
 
   messages.push({ role: 'user', name: 'You', text, at: new Date().toISOString() });
   $('#say').value = '';
+  $('#say').style.height = 'auto';
   live = { role: 'agent', name: session.name, text: '', activity: [], pending: true };
   paintChat();
   reflect();
@@ -500,12 +509,23 @@ async function send() {
 // creating and deleting sessions
 // --------------------------------------------------------------------------
 
-function openNewSession() {
-  $('#new-panel').innerHTML = sessionForm();
+async function openNewSession() {
+  $('#new-panel').innerHTML = sessionForm()
+    + html`<div class="cli-pick">
+             <div class="cli-pick-head">or link a local conversation</div>
+             <div id="cli-list" class="cli-list"><p class="empty">looking…</p></div>
+           </div>`;
   $('#new-panel').hidden = false;
   $('#new-session').addEventListener('submit', createSession);
   $('#new-cancel').addEventListener('click', closeNewSession);
+  $('#cli-list').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-adopt]');
+    if (row) adoptSession(row.dataset.adopt, row.dataset.cwd);
+  });
   $('#new-session [name=name]').focus();
+
+  const found = await attempt(() => api('/cli-sessions'));
+  if ($('#cli-list')) $('#cli-list').innerHTML = cliSessionList(found || []);
 }
 
 function closeNewSession() {
@@ -528,6 +548,28 @@ async function createSession(event) {
 
   const made = await attempt(() => api('/sessions', { method: 'POST', body }),
                              { success: 'session created' });
+  if (!made) return;
+  closeNewSession();
+  await loadSessions();
+  await selectSession(made.name);
+}
+
+/** Take over a conversation started in a terminal. The map stays 1:1: the
+ *  server refuses an id another session already holds. */
+async function adoptSession(sessionId, cwd) {
+  if (!cwd) {
+    toast('that conversation does not record its working directory', 'error');
+    return;
+  }
+  const base = (cwd.split('/').filter(Boolean).pop() || 'session')
+    .replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48) || 'session';
+  let name = base;
+  for (let n = 2; sessions.some((s) => s.name === name); n++) name = `${base}-${n}`;
+
+  const made = await attempt(() => api('/sessions', {
+    method: 'POST',
+    body: { name, cwd, session_id: sessionId, allowed_tools: csv(DEFAULT_TOOLS) },
+  }), { success: `linked ${name}` });
   if (!made) return;
   closeNewSession();
   await loadSessions();
@@ -564,7 +606,25 @@ async function clearHistory() {
 // wiring
 // --------------------------------------------------------------------------
 
+const RAIL_STORAGE = 'cls.rail';
+
+function setRail(open) {
+  document.querySelector('.term').classList.toggle('no-rail', !open);
+  localStorage.setItem(RAIL_STORAGE, open ? '1' : '0');
+}
+
 function initChat() {
+  setRail(localStorage.getItem(RAIL_STORAGE) !== '0');
+  $('#rail-toggle').addEventListener('click', () => {
+    setRail(document.querySelector('.term').classList.contains('no-rail'));
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && (e.key === 'b' || e.key === 'B')) {
+      e.preventDefault();
+      setRail(document.querySelector('.term').classList.contains('no-rail'));
+    }
+  });
+
   $('#rail-list').addEventListener('click', (e) => {
     const row = e.target.closest('[data-chat]');
     if (row) selectSession(row.dataset.chat);
@@ -574,16 +634,22 @@ function initChat() {
   $('#chat-header').addEventListener('click', (e) => {
     if (e.target.id === 'chat-delete') deleteSession();
     if (e.target.id === 'chat-clear') clearHistory();
+    const copy = e.target.closest('[data-copy]');
+    if (copy) {
+      navigator.clipboard?.writeText(copy.dataset.copy);
+      toast('copied');
+    }
   });
 
   const say = $('#say');
-  say.addEventListener('input', () => {
-    reflect();
+  const grow = () => {
     // Grow with the text, up to a point, so a long message is visible without
     // taking the transcript's room.
     say.style.height = 'auto';
     say.style.height = `${Math.min(say.scrollHeight, 200)}px`;
-  });
+  };
+  say.addEventListener('input', () => { reflect(); grow(); });
+  grow();
   say.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -596,6 +662,7 @@ function initChat() {
 async function boot() {
   await loadSessions();
   await loadHistory();
+  paintStatus();
   // A reply that is still arriving must not be trampled by the poll; the list
   // is cheap and the transcript is not what changes while a run is in flight.
   setInterval(() => { if (!live) loadSessions(); }, 3000);

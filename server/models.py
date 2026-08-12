@@ -38,13 +38,14 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class SessionCreate(BaseModel):
-    """`POST /sessions`: one session, as the operator asks for it.
+class SessionSpec(BaseModel):
+    """What a session is, and every rule about what it may be.
 
     The definition used to come from `agents.yaml`, loaded once at startup and
-    fatal if wrong. Sessions are made and unmade at runtime now, so this is a
-    request body — and every rule about what a session may be lives here, where
-    a bad one comes back as a 422 instead of a stack trace.
+    fatal if wrong. Sessions are made and unmade at runtime now, so the rules
+    live on the request body, where a bad one comes back as a 422 instead of a
+    stack trace. `SessionConfig` inherits them, so a name the API would refuse
+    cannot reach the store through some other door.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -79,16 +80,23 @@ class SessionCreate(BaseModel):
             )
         return v
 
+class SessionCreate(SessionSpec):
+    """`POST /sessions`: one session, as the operator asks for it."""
+
+    #: Adopt an existing Claude Code conversation instead of starting a fresh
+    #: one. It must exist on this machine and belong to no other session — the
+    #: map is one to one, because two workers resuming one conversation would
+    #: interleave their turns into it. Absent means "mint one on the first turn".
+    session_id: str | None = None
+
     def to_config(self) -> "SessionConfig":
-        return SessionConfig(**self.model_dump())
+        # `session_id` is not part of what a session *is*: the binding lives in
+        # state/sessions.json, next to the ids the server mints itself.
+        return SessionConfig(**self.model_dump(exclude={"session_id"}))
 
 
-class SessionConfig(SessionCreate):
-    """A session that exists: what was asked for, plus when it was made.
-
-    Subclassing the request body is what keeps one set of rules — a name the API
-    would refuse cannot reach the store through some other door.
-    """
+class SessionConfig(SessionSpec):
+    """A session that exists: what was asked for, plus when it was made."""
 
     created_at: datetime = Field(default_factory=utcnow)
 
@@ -126,6 +134,12 @@ class SessionInfo(BaseModel):
     busy: bool = False
     turns: int = 0
     last_at: datetime | None = None
+    #: Where `claude` writes this conversation. Present as soon as there is an
+    #: id, whether or not the file exists yet — `cli_exists` is the difference.
+    cli_path: str | None = None
+    cli_exists: bool = False
+    #: The CLI's own title for the conversation, when it has made one.
+    cli_title: str | None = None
 
 
 class ChatRequest(BaseModel):

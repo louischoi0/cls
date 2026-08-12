@@ -17,6 +17,8 @@
   --cancelled: #8b8b83;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --radius: 8px;
+  /* The rail's width, so collapsing it is one token rather than a layout swap. */
+  --rail-w: 232px;
 }
 
 :root { color-scheme: light; }
@@ -61,55 +63,20 @@
 
 * { box-sizing: border-box; }
 
+html, body { height: 100%; }
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Monospace everywhere: what is on the other end is a CLI, and a proportional
+     face makes its output — paths, diffs, tool calls — stop lining up. */
+  font: 15px/1.65 var(--mono);
+  /* The transcript scrolls, the document does not. */
+  overflow: hidden;
 }
 
 a { color: inherit; }
-
-/* --- top bar ------------------------------------------------------------ */
-
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  padding: 0 20px;
-  height: 52px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  position: sticky;
-  top: 0;
-  z-index: 20;
-}
-
-.brand {
-  font-family: var(--mono);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  text-decoration: none;
-  font-size: 16px;
-}
-.brand span {
-  color: var(--ink-faint);
-  font-weight: 400;
-  margin-left: 6px;
-}
-
-#nav { display: flex; gap: 4px; flex: 1; }
-#nav a {
-  padding: 6px 12px;
-  border-radius: var(--radius);
-  text-decoration: none;
-  color: var(--ink-soft);
-  font-size: 14px;
-}
-#nav a:hover { background: var(--panel-2); color: var(--ink); }
-#nav a.active { background: var(--panel-2); color: var(--ink); font-weight: 600; }
-
-.topbar-right { display: flex; align-items: center; gap: 8px; }
 
 .pulse {
   width: 8px; height: 8px; border-radius: 50%;
@@ -120,18 +87,37 @@ a { color: inherit; }
 .pulse.error { background: var(--failed); }
 @keyframes blink { 50% { opacity: 0.25; } }
 
+/* Icon buttons.
+   `display: inline-flex` with both axes centred rather than relying on
+   line-height: the glyphs here (+, ⏎, ◐, ⚿, ▚) have wildly different optical
+   centres and metrics, so line-height alone leaves each one sitting at a
+   different height inside the same box. */
 .icon-btn {
-  background: none; border: 1px solid var(--line); color: var(--ink-soft);
-  border-radius: var(--radius); width: 30px; height: 30px; cursor: pointer;
-  font-size: 14px; line-height: 1;
-}
-.icon-btn:hover { background: var(--panel-2); color: var(--ink); }
-/* One of them is an anchor, which needs the centring a button gets for free. */
-a.icon-btn {
-  display: inline-flex; align-items: center; justify-content: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1;
   text-decoration: none;
+  transition: color 120ms, background 120ms, border-color 120ms;
 }
-a.icon-btn.active { border-color: var(--accent); color: var(--accent); }
+.icon-btn:hover:not(:disabled) {
+  background: var(--panel-2);
+  border-color: var(--line);
+  color: var(--ink);
+}
+.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.icon-btn:disabled { opacity: 0.35; cursor: default; }
 
 /* --- layout ------------------------------------------------------------- */
 
@@ -384,169 +370,401 @@ code { font-family: var(--mono); font-size: 0.92em; background: var(--panel-2); 
   main { padding: 20px 12px 60px; }
 }
 
-/* Cleartext warning. Shown only when the browser cannot seal (no WebCrypto
-   outside a secure context), so its presence is the whole message — it sits
-   above the view rather than inside one, because it is true of every page. */
-.wirewarn {
-  margin: 0;
-  padding: 10px 18px;
-  background: color-mix(in srgb, var(--failed) 14%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--failed) 40%, transparent);
-  color: var(--failed);
-  font-size: 13px;
-  line-height: 1.5;
-}
+/* --- the terminal ---------------------------------------------------------
+   Full viewport, two columns, no page scroll. The transcript is the only thing
+   that grows; the prompt box and the status line hold their place at the
+   bottom the way they do in a CLI. */
 
-/* --- the chat -------------------------------------------------------------
-   Two columns: the sessions, and the one conversation. The page itself never
-   scrolls — the rail and the transcript scroll independently, so the composer
-   stays put while a long reply arrives. */
-
-.chat {
+.term {
   display: grid;
-  grid-template-columns: 260px 1fr;
-  gap: 0;
-  height: calc(100vh - 53px);
+  grid-template-columns: var(--rail-w) 1fr;
+  height: calc(100vh - 26px);   /* the status line is the 26px */
   min-height: 0;
+  transition: grid-template-columns 140ms ease;
 }
+.term.no-rail {
+  --rail-w: 0px;
+}
+.term.no-rail .rail { border-right: none; overflow: hidden; }
 
-.chat-rail {
+/* --- the session rail --- */
+
+.rail {
   border-right: 1px solid var(--line);
   background: var(--panel);
   overflow-y: auto;
-  padding: 10px;
   min-height: 0;
+  padding: 6px;
 }
 
-.chat-rail-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 2px 4px 10px;
-  font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
+.rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 6px;
+}
+.rail-title {
+  color: var(--ink-faint);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
 
-.chat-rail-row {
+.rail-row {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 2px 8px;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: 8px;
   width: 100%;
-  text-align: left;
-  padding: 8px 10px;
-  margin-bottom: 4px;
+  padding: 6px 8px;
+  margin-bottom: 2px;
   background: none;
   border: 1px solid transparent;
-  border-radius: var(--radius);
+  border-radius: 6px;
+  color: var(--ink-soft);
   cursor: pointer;
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: left;
 }
-.chat-rail-row:hover { background: var(--panel-2); }
-.chat-rail-row.on { background: var(--panel-2); border-color: var(--line); }
-.chat-rail-name { font-weight: 600; color: var(--ink); }
-.chat-rail-sub { grid-column: 1; font-size: 12px; }
-.chat-rail-row .dot { grid-row: 1 / span 2; align-self: center; }
+.rail-row:hover { background: var(--panel-2); color: var(--ink); }
+.rail-row.on {
+  background: var(--panel-2);
+  border-color: var(--line);
+  color: var(--ink);
+}
+.rail-mark { color: var(--accent); text-align: center; }
+.rail-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-meta { display: inline-flex; align-items: center; justify-content: center; }
+.rail-turns { color: var(--ink-faint); font-size: 11px; }
 
 .dot {
-  width: 8px; height: 8px; border-radius: 50%;
+  width: 7px; height: 7px; border-radius: 50%;
   background: var(--ink-faint); display: inline-block;
 }
 .dot.busy { background: var(--running); animation: blink 1s ease-in-out infinite; }
 
-.chat-main { display: flex; flex-direction: column; min-height: 0; }
+/* --- the pane --- */
 
-.chat-head {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 12px;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-}
-.chat-head h2 { margin: 0; font-size: 16px; }
-.chat-head-sub { margin: 2px 0 0; }
-.chat-head-actions { display: flex; align-items: center; gap: 8px; }
-button.danger:hover:not(:disabled) { border-color: var(--failed); color: var(--failed); }
-
-.chat-log {
-  flex: 1;
-  overflow-y: auto;
-  padding: 18px;
+.term-main {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  min-width: 0;
   min-height: 0;
+  width: 100%;
+  height: 100%;
 }
 
-.chat-msg { max-width: min(74ch, 88%); }
-.chat-msg.mine { align-self: flex-end; }
-.chat-msg.theirs { align-self: flex-start; }
-
-.chat-who {
-  display: flex; gap: 8px; align-items: baseline;
-  font-size: 12px; color: var(--ink-faint); margin-bottom: 4px;
-}
-.chat-msg.mine .chat-who { justify-content: flex-end; }
-
-.chat-text {
-  white-space: pre-wrap;
-  word-break: break-word;
-  padding: 10px 14px;
-  border-radius: 14px;
-  border: 1px solid var(--line);
+/* The title line: what this session is, in one row, like a terminal's own. */
+.term-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 18px;
+  height: 32px;
+  border-bottom: 1px solid var(--line);
   background: var(--panel);
-  line-height: 1.6;
-}
-.chat-msg.mine .chat-text {
-  background: var(--accent);
-  color: var(--accent-ink);
-  border-color: var(--accent);
-}
-.chat-msg.failed .chat-text { border-color: var(--failed); color: var(--failed); }
-.chat-text.caret { color: var(--ink-faint); animation: blink 1s ease-in-out infinite; }
-
-.chat-activity {
-  margin-top: 6px;
-  font-family: var(--mono);
   font-size: 12px;
   color: var(--ink-faint);
+  white-space: nowrap;
 }
-.chat-activity summary { cursor: pointer; padding: 2px 0; }
-.chat-act { display: flex; gap: 8px; padding: 1px 0 1px 10px; }
-.chat-act .smark { width: 1em; text-align: center; }
-.chat-act .stext { white-space: pre-wrap; word-break: break-word; }
-.chat-act.result { color: var(--done); }
+.term-title-name { color: var(--ink); font-weight: 600; }
+.term-title-path { overflow: hidden; text-overflow: ellipsis; }
+.term-title-spacer { flex: 1; }
+.term-title-tools, .term-title-model { color: var(--ink-faint); }
+.term-title-model { color: var(--accent); }
 
-.composer {
+/* A text button that reads as a command, not a control. */
+.linkish {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.linkish:hover { color: var(--ink); text-decoration: underline; }
+.linkish.danger:hover { color: var(--failed); }
+
+.term-log {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 18px 10px;
+  scrollbar-width: thin;
+}
+
+/* --- one turn --- */
+
+.turn {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+  max-width: none;
+  padding: 7px 0;
+  /* No max-width and no alignment games: a turn runs the full width of the
+     pane, the way a line does in a terminal. */
+}
+/* The transcript sits flush against the title line, so the first turn must not
+   put the gap back. */
+.turn:first-child { padding-top: 0; }
+
+.turn-gutter {
+  color: var(--ink-faint);
+  text-align: center;
+  user-select: none;
+}
+.turn.theirs .turn-gutter { color: var(--accent); }
+.turn.failed .turn-gutter { color: var(--failed); }
+
+.turn-body { min-width: 0; }
+
+.turn-meta {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  color: var(--ink-faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.turn-who { text-transform: lowercase; }
+
+.turn-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-top: 2px;
+  line-height: 1.65;
+}
+.turn.mine .turn-text { color: var(--ink-soft); }
+.turn.failed .turn-text { color: var(--failed); }
+.turn-text.caret { color: var(--accent); animation: blink 1s step-end infinite; }
+
+/* The tool trace: the CLI's `⎿` tree under a reply, folded by default. */
+.trace { margin-top: 6px; font-size: 12px; color: var(--ink-faint); }
+.trace summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  cursor: pointer;
+  list-style: none;
+}
+.trace summary::-webkit-details-marker { display: none; }
+.trace summary:hover { color: var(--ink-soft); }
+.trace-mark { color: var(--line); }
+.trace-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-count {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10px;
+}
+.trace-line {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: 10px;
+  padding: 1px 0 1px 22px;
+}
+.trace-kind { color: var(--line); text-align: right; }
+.trace-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+.trace-line.result .trace-text { color: var(--done); }
+
+/* --- the empty pane --- */
+
+.term-splash { width: 100%; padding: 10px 0; }
+.term-banner {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.term-spark { color: var(--accent); font-size: 18px; }
+.term-banner-line { color: var(--ink); }
+.term-banner-sub { color: var(--ink-faint); font-size: 12px; margin-top: 2px; }
+.term-tip { color: var(--ink-faint); font-size: 12px; padding: 0 4px; }
+
+/* --- the prompt box ------------------------------------------------------
+   The CLI's input: one bordered field, the caret inside it, the hint below. */
+
+.prompt-box { padding: 6px 18px 10px; }
+
+.prompt-field {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  transition: border-color 120ms;
+}
+.prompt-field:focus-within { border-color: var(--accent); }
+
+.prompt-ps {
+  color: var(--accent);
+  font-weight: 700;
+  user-select: none;
+  /* Sits on the first line of a growing textarea rather than drifting to the
+     middle of it. */
+  align-self: start;
+  padding-top: 2px;
+}
+
+.prompt-field textarea {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  min-height: 0;
+  max-height: 200px;
+  resize: none;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 15px;
+  line-height: 1.65;
+}
+.prompt-field textarea:focus { outline: none; }
+.prompt-field textarea::placeholder { color: var(--ink-faint); }
+
+.icon-btn.send { align-self: end; }
+.icon-btn.send:not(:disabled) { color: var(--accent); }
+
+.prompt-hint {
+  padding: 4px 2px 0;
+  color: var(--ink-faint);
+  font-size: 11px;
+  min-height: 15px;
+}
+
+/* --- the status line ------------------------------------------------------
+   A tmux-style row along the bottom: what is true right now, plus the controls
+   that used to need a whole top bar. */
+
+.statusline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 26px;
+  padding: 0 8px;
   border-top: 1px solid var(--line);
   background: var(--panel);
-  padding: 12px 18px;
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 8px 10px;
-  align-items: end;
+  font-size: 11px;
+  color: var(--ink-faint);
 }
-.composer textarea {
-  min-height: 0;
-  resize: none;
-  font-family: inherit;
-  font-size: 15px;
-  max-height: 200px;
-}
-.chat-hint { grid-column: 1 / -1; font-size: 12px; }
+.status-left { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; overflow: hidden; }
+.status-right { display: flex; align-items: center; gap: 4px; }
+.statusline .icon-btn { width: 22px; height: 22px; font-size: 11px; }
 
-/* The create-a-session form, inline in the rail rather than in a dialog: it is
-   short, and it belongs beside the list it adds to. */
+.stat-key {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-weight: 600;
+}
+.stat { white-space: nowrap; }
+.stat + .stat::before { content: "·"; margin-right: 10px; color: var(--line); }
+
+/* --- the new-session form --- */
+
 .session-form {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   padding: 10px;
   margin-bottom: 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel-2);
 }
-.session-form label { display: grid; gap: 3px; font-size: 12px; color: var(--ink-soft); }
-.session-form input, .session-form textarea { font-size: 13px; }
-.session-form textarea { min-height: 0; }
-.session-form .wide { grid-column: 1 / -1; }
+.session-form label {
+  display: grid;
+  gap: 2px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.session-form input, .session-form textarea {
+  font-family: var(--mono);
+  font-size: 12px;
+  min-height: 0;
+  padding: 5px 7px;
+}
+.session-form textarea { resize: vertical; }
 
 @media (max-width: 720px) {
-  .chat { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-  .chat-rail { max-height: 34vh; border-right: none; border-bottom: 1px solid var(--line); }
+  .term { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .rail { max-height: 30vh; border-right: none; border-bottom: 1px solid var(--line); }
+  .term.no-rail { grid-template-rows: 0 1fr; }
+}
+
+/* --- the 1:1 link to a CLI conversation ---------------------------------- */
+
+/* The id in the title line. Filled diamond: the transcript exists on disk.
+   Hollow: the session has an id but has not run, so `claude` has not written
+   the file yet. */
+.cli-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.cli-link:hover { color: var(--ink); border-color: var(--ink-faint); }
+.cli-link.none { cursor: default; border-style: dashed; }
+.cli-link.on .cli-dot { color: var(--done); }
+.cli-link.pending .cli-dot { color: var(--queued); }
+
+.cli-pick { margin-top: 8px; }
+.cli-pick-head {
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0 2px 4px;
+}
+.cli-list { display: grid; gap: 2px; }
+
+.cli-row {
+  display: grid;
+  gap: 1px;
+  width: 100%;
+  padding: 5px 8px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-family: var(--mono);
+  text-align: left;
+}
+.cli-row:hover { background: var(--panel); border-color: var(--line); color: var(--ink); }
+.cli-row-title {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cli-row-sub {
+  color: var(--ink-faint);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

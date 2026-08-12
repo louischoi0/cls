@@ -82,8 +82,19 @@ class RunResult:
     session_was_reset: bool = False
 
 
+class SessionIdTaken(Exception):
+    """Two console sessions cannot share one Claude Code conversation."""
+
+
 class SessionIds:
-    """agent name -> Claude Code session id, persisted across restarts."""
+    """console session name -> Claude Code session id, persisted across restarts.
+
+    The map is **one to one in both directions**. A name has at most one
+    conversation, which is what `--resume` needs, and a conversation has at most
+    one name — two workers resuming one session id would interleave their turns
+    into a single transcript and corrupt it. `set` enforces the second half;
+    the first is the dict.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path).expanduser()
@@ -108,11 +119,30 @@ class SessionIds:
     def get(self, agent: str) -> str | None:
         return self._sessions.get(agent)
 
+    def owner_of(self, session_id: str) -> str | None:
+        """Which console session holds this conversation, if any."""
+        for name, held in self._sessions.items():
+            if held == session_id:
+                return name
+        return None
+
     def set(self, agent: str, session_id: str) -> None:
         if self._sessions.get(agent) == session_id:
             return
+        owner = self.owner_of(session_id)
+        if owner is not None and owner != agent:
+            raise SessionIdTaken(
+                f"session {session_id} already belongs to {owner!r}"
+            )
         self._sessions[agent] = session_id
         self._save()
+
+    def release(self, agent: str) -> str | None:
+        """Forget a name's conversation, freeing it to be adopted again."""
+        session_id = self._sessions.pop(agent, None)
+        if session_id is not None:
+            self._save()
+        return session_id
 
     def as_dict(self) -> dict[str, str]:
         return dict(self._sessions)
