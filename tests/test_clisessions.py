@@ -377,3 +377,55 @@ def test_asking_for_cli_history_that_is_not_there_is_empty_not_a_guess(client, h
     client.post("/sessions", json={"name": "alpha", "cwd": str(home / "work")},
                 headers=AUTH)
     assert client.get("/sessions/alpha/history?source=cli", headers=AUTH).json() == []
+
+
+def test_a_transcript_is_found_after_its_session_changes_directory(cli_root: Path, home: Path):
+    """`claude` files a conversation under the directory it is *running in*, so
+    an agent that steps into a git worktree moves its own transcript. Deriving
+    the path from the session's configured cwd finds nothing at that point —
+    which is exactly what happened to a real session here."""
+    ran_in = "/home/x/work/.claude/worktrees/feature"
+    write_conversation(cli_root, ran_in, SESSION_A, convo(ran_in))
+
+    # Where the configured cwd says it should be: nothing.
+    assert not clisessions.path_for(SESSION_A, "/home/x/work").is_file()
+    # Where it actually is, found by id alone.
+    found = clisessions.locate(SESSION_A)
+    assert found is not None and "worktrees-feature" in str(found)
+
+
+def test_a_moved_transcript_still_replays(cli_root: Path, home: Path):
+    config = Config(home=home, api_key=KEY, start_workers=False, claude_bin="claude")
+    with TestClient(create_app(config)) as client:
+        client.post("/sessions", json={"name": "alpha", "cwd": str(home / "work")},
+                    headers=AUTH)
+        # It ran, and ended up somewhere else entirely.
+        elsewhere = str(home / "work" / ".claude" / "worktrees" / "feature")
+        write_conversation(cli_root, elsewhere, SESSION_A, convo(elsewhere))
+        client.app.state.cc.session_ids.set("alpha", SESSION_A)
+
+        info = client.get("/sessions/alpha", headers=AUTH).json()
+        assert info["cli_exists"] is True
+        assert "worktrees-feature" in info["cli_path"]
+
+        body = client.get("/sessions/alpha/history", headers=AUTH).json()
+        assert [t["source"] for t in body] == ["cli", "cli"]
+
+
+def test_reading_a_conversation_twice_does_not_read_the_file_twice(cli_root: Path):
+    """The session list is polled every few seconds and every row wants a title."""
+    path = write_cli_session(cli_root, "/home/x/work", SESSION_A, title="Cached")
+    first = clisessions.read_session(path)
+    path.chmod(0o000)          # unreadable now; only the cache can answer
+    try:
+        second = clisessions.read_session(path)
+        assert second is not None and second.title == "Cached" == first.title
+    finally:
+        path.chmod(0o644)
+
+
+def test_a_changed_conversation_is_re_read(cli_root: Path):
+    path = write_cli_session(cli_root, "/home/x/work", SESSION_A, title="Before")
+    assert clisessions.read_session(path).title == "Before"
+    write_cli_session(cli_root, "/home/x/work", SESSION_A, title="After")
+    assert clisessions.read_session(path).title == "After"

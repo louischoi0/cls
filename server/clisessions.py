@@ -99,10 +99,26 @@ def _edge_lines(path: Path) -> list[str]:
     return lines
 
 
+#: Parsed conversations, keyed by (path, mtime, size). The console polls the
+#: session list every few seconds and every row wants a title; without this each
+#: poll re-reads 256 KiB per session for an answer that has not changed.
+_CACHE: dict[tuple[str, int, int], CliSession] = {}
+_CACHE_MAX = 256
+
+
 def read_session(path: Path, owner: str | None = None) -> CliSession | None:
     """One `.jsonl` -> what is worth knowing about it, or None if unreadable."""
     try:
         stat = path.stat()
+    except OSError:
+        return None
+
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached.model_copy(update={"owner": owner})
+
+    try:
         lines = _edge_lines(path)
     except OSError:
         return None
@@ -125,7 +141,7 @@ def read_session(path: Path, owner: str | None = None) -> CliSession | None:
         elif kind == "last-prompt" and isinstance(record.get("lastPrompt"), str):
             last_prompt = record["lastPrompt"]
 
-    return CliSession(
+    session = CliSession(
         session_id=path.stem,
         cwd=cwd,
         path=str(path),
@@ -135,6 +151,10 @@ def read_session(path: Path, owner: str | None = None) -> CliSession | None:
         size_bytes=stat.st_size,
         owner=owner,
     )
+    if len(_CACHE) >= _CACHE_MAX:
+        _CACHE.clear()          # bounded, and a cold read costs one edge scan
+    _CACHE[key] = session
+    return session
 
 
 def scan(root: Path | str | None = None, owners: dict[str, str] | None = None) -> list[CliSession]:
@@ -159,8 +179,19 @@ def scan(root: Path | str | None = None, owners: dict[str, str] | None = None) -
     return found
 
 
-def find(session_id: str, root: Path | str | None = None) -> CliSession | None:
-    """One conversation by id, wherever on this machine it lives."""
+def locate(session_id: str, root: Path | str | None = None) -> Path | None:
+    """Where a conversation actually is, by id alone.
+
+    **A session's transcript does not stay where its cwd says it will.** `claude`
+    files a conversation under whatever directory it is *running in*, so an
+    agent that steps into a git worktree — or anywhere else — moves its own
+    transcript to a different project directory mid-conversation. Deriving the
+    path from the session's configured cwd finds nothing in that case, and the
+    console reports a live conversation as missing.
+
+    So the id is the key and the directory is the search space. No file is
+    opened here; this is a stat per project directory.
+    """
     base = root_dir(root)
     if not base.is_dir():
         return None
@@ -169,8 +200,14 @@ def find(session_id: str, root: Path | str | None = None) -> CliSession | None:
             continue
         path = project / f"{session_id}.jsonl"
         if path.is_file():
-            return read_session(path)
+            return path
     return None
+
+
+def find(session_id: str, root: Path | str | None = None) -> CliSession | None:
+    """One conversation by id, wherever on this machine it lives."""
+    path = locate(session_id, root)
+    return read_session(path) if path is not None else None
 
 
 def path_for(session_id: str, cwd: Path | str, root: Path | str | None = None) -> Path:

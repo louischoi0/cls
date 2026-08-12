@@ -224,15 +224,19 @@ class AppState:
     def info(self, config: SessionConfig, counts: dict) -> SessionInfo:
         turns, last_at = counts.get(config.name, (0, None))
         worker = self.workers.get(config.name)
-        # The 1:1 link, resolved rather than assumed: the id this session holds,
-        # where `claude` files that conversation, and whether it is there yet.
+        # The 1:1 link, resolved rather than assumed. Found by id rather than
+        # derived from cwd: `claude` files a conversation under the directory it
+        # is *running in*, so an agent that steps into a git worktree moves its
+        # own transcript, and a path computed from the configured cwd finds
+        # nothing. `path_for` is only the prediction for one that has not run.
         session_id = self.session_ids.get(config.name)
         cli_path = cli_title = None
         cli_exists = False
         if session_id:
-            path = clisessions.path_for(session_id, config.cwd)
+            found_at = clisessions.locate(session_id)
+            cli_exists = found_at is not None
+            path = found_at or clisessions.path_for(session_id, config.cwd)
             cli_path = str(path)
-            cli_exists = path.is_file()
             if cli_exists:
                 found = clisessions.read_session(path)
                 cli_title = found.title if found else None
@@ -578,13 +582,13 @@ def create_app(
         pin the choice, which is how the two can be compared.
         """
         st: AppState = request.app.state.cc
-        config = _session_or_404(st, name)
+        _session_or_404(st, name)
         limit = max(1, min(limit, 1000))
 
         session_id = st.session_ids.get(name)
         if source in ("auto", "cli") and session_id:
-            path = clisessions.path_for(session_id, config.cwd)
-            if path.is_file():
+            path = clisessions.locate(session_id)
+            if path is not None:
                 return [
                     Turn(
                         session=name,
