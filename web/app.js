@@ -388,6 +388,11 @@ async function* streamEvents(messageId, signal) {
 // --------------------------------------------------------------------------
 
 const SELECTED_STORAGE = 'cls.session';
+const MARKDOWN_STORAGE = 'cls.markdown';
+
+//: Replies are Markdown by default; `¶` in the status line turns that off for
+//: anyone who would rather read exactly what the model emitted.
+let markdownOn = localStorage.getItem(MARKDOWN_STORAGE) !== '0';
 
 let sessions = [];
 let selected = localStorage.getItem(SELECTED_STORAGE) || '';
@@ -414,7 +419,7 @@ function paintChat() {
   const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
   const shown = live ? [...messages, live] : messages;
   log.innerHTML = session
-    ? chatTranscript(shown)
+    ? chatTranscript(shown, { markdown: markdownOn })
     : html`<p class="empty">No session selected.</p>`;
   // Follow the tail unless the reader has scrolled up to read something.
   if (atBottom) log.scrollTop = log.scrollHeight;
@@ -662,6 +667,19 @@ function initChat() {
     if (row) selectSession(row.dataset.chat);
   });
   $('#rail-new').addEventListener('click', openNewSession);
+
+  const md = $('#md-toggle');
+  const paintMd = () => {
+    md.classList.toggle('on', markdownOn);
+    md.title = markdownOn ? 'Markdown on — click for raw text' : 'Raw text — click to render Markdown';
+  };
+  md.addEventListener('click', () => {
+    markdownOn = !markdownOn;
+    localStorage.setItem(MARKDOWN_STORAGE, markdownOn ? '1' : '0');
+    paintMd();
+    paintChat();
+  });
+  paintMd();
 
   $('#chat-header').addEventListener('click', (e) => {
     if (e.target.id === 'chat-delete') deleteSession();

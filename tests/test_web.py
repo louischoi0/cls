@@ -679,3 +679,67 @@ def test_a_replayed_transcript_says_where_it_came_from(js):
     # The console's own turns get no such banner.
     own = js.ctx.eval(f"String(chatTranscript({json.dumps([{'role': 'user', 'text': 'hi'}])}))")
     assert "replayed" not in own
+
+
+# --- markdown in a reply ----------------------------------------------------- #
+
+
+def test_a_reply_renders_as_markdown(js):
+    msg = {"role": "agent", "name": "a",
+           "text": "# Title\n\nSome **bold** text.\n\n- one\n- two"}
+    out = js("chatBubble", msg)
+    assert "<h1>Title</h1>" in out
+    assert "<strong>bold</strong>" in out
+    assert "<li>one</li>" in out
+    assert 'class="turn-text md"' in out
+
+
+def test_what_the_user_typed_is_left_alone(js):
+    """Silently restyling someone's own words is a small betrayal of a text box
+    — and `*` or `#` in a question should stay where they were typed."""
+    out = js("chatBubble", {"role": "user", "text": "# not a heading and *not* italic"})
+    assert "<h1>" not in out and "<em>" not in out
+    assert "# not a heading" in out
+
+
+def test_markdown_can_be_turned_off(js):
+    msg = {"role": "agent", "name": "a", "text": "# Title"}
+    off = js.ctx.eval(f"String(chatBubble({json.dumps(msg)}, {{markdown: false}}))")
+    assert "<h1>" not in off and "# Title" in off
+
+
+def test_a_table_in_a_reply_becomes_a_table(js):
+    md = "| what | where |\n|------|-------|\n| sessions | chat.db |"
+    out = js("renderMarkdown", md)
+    assert "<th>what</th>" in out and "<td>chat.db</td>" in out
+
+
+def test_a_pipe_line_without_a_separator_is_not_a_table(js):
+    """`| this | that |` in prose is not a header unless a `|---|` follows."""
+    out = js("renderMarkdown", "a | b | c\nnot a table")
+    assert "<table>" not in out
+
+
+def test_fenced_code_survives_intact(js):
+    out = js("renderMarkdown", "```bash\n./run.sh --flag\n```")
+    assert 'pre class="md-code"' in out
+    assert "./run.sh --flag" in out
+
+
+def test_markdown_cannot_smuggle_html(js):
+    """The source is escaped before any markup is added, so a reply that
+    contains a tag renders as text — including inside a fence."""
+    out = js("renderMarkdown", "<script>alert(1)</script>\n\n```\n<img src=x onerror=alert(1)>\n```")
+    assert "<script>" not in out
+    assert "<img" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_a_javascript_link_is_defused(js):
+    out = js("renderMarkdown", "[click](javascript:alert(1))")
+    assert "javascript:" not in out
+
+
+def test_the_markdown_toggle_is_in_the_status_line():
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    assert 'id="md-toggle"' in page and "aria-label=" in page.split('id="md-toggle"')[1][:200]

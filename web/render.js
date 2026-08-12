@@ -123,7 +123,29 @@ function renderMarkdown(source) {
     if (para.length) { out.push(`<p>${inlineMd(para.join(' '))}</p>`); para = []; }
   };
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // A table needs the line after it to decide, which is why this loop is
+    // indexed: `| a | b |` is only a header if a `|---|---|` follows it.
+    if (!inCode && /^\s*\|.*\|\s*$/.test(line)
+        && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1] || '')) {
+      closePara(); closeList();
+      const cells = (row) => row.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+      out.push('<table><thead><tr>');
+      for (const cell of cells(line)) out.push(`<th>${inlineMd(cell)}</th>`);
+      out.push('</tr></thead><tbody>');
+      i += 2;
+      for (; i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i]); i++) {
+        out.push('<tr>');
+        for (const cell of cells(lines[i])) out.push(`<td>${inlineMd(cell)}</td>`);
+        out.push('</tr>');
+      }
+      i--;   // the loop's own step lands on the first non-table line
+      out.push('</tbody></table>');
+      continue;
+    }
+
     if (/^\s*```/.test(line)) {
       closePara(); closeList();
       out.push(inCode ? '</code></pre>' : '<pre class="md-code"><code>');
@@ -347,8 +369,15 @@ function chatActivity(events, open) {
     </details>`;
 }
 
-/** One turn, as a terminal block. `pending` is a reply still arriving. */
-function chatBubble(msg) {
+/** One turn, as a terminal block. `pending` is a reply still arriving.
+ *
+ * A reply is Markdown — headings, lists, fenced code, tables — so it is
+ * rendered as such unless `opts.markdown` is false. A *user* turn is left
+ * exactly as typed: what you wrote is what you should see, and silently
+ * restyling someone's own words is a small betrayal of a text box.
+ */
+function chatBubble(msg, opts) {
+  const markdown = !opts || opts.markdown !== false;
   const mine = msg.role === 'user';
   const classes = [
     'turn', mine ? 'mine' : 'theirs',
@@ -356,9 +385,14 @@ function chatBubble(msg) {
   ].filter(Boolean).join(' ');
   // A pending reply with nothing said yet gets the block caret, so the wait has
   // a visible subject rather than looking like a dropped message.
-  const body = msg.text
-    ? html`<div class="turn-text">${msg.text}</div>`
-    : (msg.pending ? html`<div class="turn-text caret">█</div>` : '');
+  let body = '';
+  if (msg.text && !mine && markdown) {
+    body = html`<div class="turn-text md">${raw(renderMarkdown(msg.text))}</div>`;
+  } else if (msg.text) {
+    body = html`<div class="turn-text">${msg.text}</div>`;
+  } else if (msg.pending) {
+    body = html`<div class="turn-text caret">█</div>`;
+  }
   return html`
     <div class="${classes}" ${msg.id ? raw(`data-msg="${esc(msg.id)}"`) : ''}>
       <div class="turn-gutter" aria-hidden="true">${mine ? PS_USER : PS_AGENT}</div>
@@ -373,12 +407,13 @@ function chatBubble(msg) {
     </div>`;
 }
 
-function chatTranscript(messages) {
+function chatTranscript(messages, opts) {
+  const one = (msg) => chatBubble(msg, opts);
   if (messages && messages.length && messages[0].source === 'cli') {
     // The console is showing the CLI's record, not its own. Worth one line:
     // it explains why turns exist that this browser never sent.
     return html`<div class="from-cli">↻ replayed from the Claude Code transcript on disk</div>`
-      + messages.map(chatBubble).join('');
+      + messages.map(one).join('');
   }
   if (!messages || !messages.length) {
     return html`
@@ -396,7 +431,7 @@ function chatTranscript(messages) {
         </p>
       </div>`;
   }
-  return messages.map(chatBubble).join('');
+  return messages.map(one).join('');
 }
 
 /** What the count column says about a session.
