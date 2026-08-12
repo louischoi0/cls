@@ -796,3 +796,19 @@ def test_korean_survives_escaping_and_markdown(js):
 def test_korean_in_a_turn_is_not_mangled(js):
     out = js("chatBubble", {"role": "user", "text": "세션 목록을 보여줘"})
     assert "세션 목록을 보여줘" in out
+
+
+def test_bold_in_a_reply_takes_the_accent_colour():
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    rule = css.split(".turn-text.md strong {")[1].split("}")[0]
+    assert "color: var(--accent)" in rule
+    assert "font-weight: 700" in rule
+
+
+def test_the_accent_on_bold_is_scoped_to_a_rendered_reply():
+    """`<strong>` also appears in the console's own chrome — the empty rail, the
+    key dialog — where it is emphasis, not a highlight."""
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    for line in css.splitlines():
+        if line.strip().startswith("strong") or " strong {" in line:
+            assert line.strip().startswith(".turn-text.md strong"), line

@@ -710,6 +710,11 @@ dialog input { margin-bottom: 12px; }
 
 .turn-text.md a { color: var(--accent); text-underline-offset: 2px; }
 
+/* Bold is what the model is pointing at, so it gets the accent rather than
+   just more weight. Scoped to a rendered reply: `<strong>` also appears in the
+   console's own chrome, where it is emphasis and not a highlight. */
+.turn-text.md strong { color: var(--accent); font-weight: 700; }
+
 .turn-text.md blockquote {
   margin: 0 0 8px;
   padding-left: 10px;
