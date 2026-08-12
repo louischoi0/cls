@@ -636,3 +636,16 @@ code { font-family: var(--mono); font-size: 0.92em; background: var(--panel-2); 
   #nav a { padding: 6px 8px; }
   main { padding: 20px 12px 60px; }
 }
+
+/* Cleartext warning. Shown only when the browser cannot seal (no WebCrypto
+   outside a secure context), so its presence is the whole message — it sits
+   above the view rather than inside one, because it is true of every page. */
+.wirewarn {
+  margin: 0;
+  padding: 10px 18px;
+  background: color-mix(in srgb, var(--failed) 14%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--failed) 40%, transparent);
+  color: var(--failed);
+  font-size: 13px;
+  line-height: 1.5;
+}

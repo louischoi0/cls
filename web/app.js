@@ -39,17 +39,133 @@ function busy(delta) {
   pulse.title = inflight > 0 ? `${inflight} request(s) in flight` : 'idle';
 }
 
-async function api(path, { method = 'GET', body, markdown = false } = {}) {
-  const headers = { 'X-API-Key': apiKey };
-  let payload;
-  if (body !== undefined) {
-    headers['Content-Type'] = markdown ? 'text/markdown' : 'application/json';
-    payload = markdown ? body : JSON.stringify(body);
+// --------------------------------------------------------------------------
+// sealed transport — the crypto half (framing lives in render.js)
+// --------------------------------------------------------------------------
+
+/* When this is on, no request carries the API key: the console proves it holds
+ * the key by sealing an envelope the server can open. server/sealed.py has the
+ * format and what it is worth against TLS.
+ *
+ * The catch is `crypto.subtle`, which browsers expose only in a secure context
+ * — https, or http on localhost. Reached at http://<lan-ip>:port, the console
+ * has no WebCrypto at all and cannot seal, which is exactly the case sealing
+ * was for. So: reach it over an SSH tunnel (the origin becomes 127.0.0.1, and
+ * sealing turns itself on), or put TLS in front. The banner below says so
+ * rather than quietly falling back to a cleartext key.
+ */
+const SEALED_VERSION = 'v1';
+const SEALED_MEDIA_TYPE = 'application/cc-sealed';
+const canSeal = !!(globalThis.crypto && globalThis.crypto.subtle);
+
+const utf8 = new TextEncoder();
+const AAD_AUTH = utf8.encode('cc-automation/sealed/v1/auth');
+const AAD_REQUEST = utf8.encode('cc-automation/sealed/v1/request');
+const AAD_RESPONSE = utf8.encode('cc-automation/sealed/v1/response');
+const AAD_SSE = utf8.encode('cc-automation/sealed/v1/sse');
+
+let sealedKey = null;
+let sealedKeyFor = '';
+
+/** The AES key for the current API key, derived once and cached. */
+async function sealingKey() {
+  if (!canSeal || !apiKey) return null;
+  if (sealedKey && sealedKeyFor === apiKey) return sealedKey;
+  const material = await crypto.subtle.importKey(
+    'raw', utf8.encode(apiKey), 'HKDF', false, ['deriveKey']
+  );
+  sealedKey = await crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: utf8.encode('cc-automation/sealed/v1'),
+      info: utf8.encode('aes-256-gcm'),
+    },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+  sealedKeyFor = apiKey;
+  return sealedKey;
+}
+
+async function sealBytes(key, bytes, aad) {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce, additionalData: aad }, key, bytes
+  );
+  return sealedEnvelope(SEALED_VERSION, nonce, new Uint8Array(sealed));
+}
+
+async function openBytes(key, envelope, aad) {
+  const parts = parseEnvelope(envelope, SEALED_VERSION);
+  if (!parts) throw new ApiError(0, 'the server sent a malformed sealed reply');
+  try {
+    const plain = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: parts.nonce, additionalData: aad }, key, parts.ciphertext
+    );
+    return new Uint8Array(plain);
+  } catch {
+    // The tag did not verify: either the key is wrong or something rewrote the
+    // bytes in flight. Both mean the same thing here — do not trust the body.
+    throw new ApiError(0, 'the sealed reply did not verify');
   }
+}
+
+async function sha256Hex(bytes) {
+  return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
+}
+
+/** Headers (and sealed body) for one outbound request. */
+async function sealRequest(key, method, path, payload, contentType) {
+  const raw = payload === undefined ? null : utf8.encode(payload);
+  const sealedBody = raw ? utf8.encode(await sealBytes(key, raw, AAD_REQUEST)) : null;
+  const claims = { m: method.toUpperCase(), p: path, ts: Math.floor(Date.now() / 1000) };
+  if (sealedBody) {
+    claims.bh = await sha256Hex(sealedBody);
+    claims.ct = contentType;
+  }
+  const auth = await sealBytes(key, utf8.encode(JSON.stringify(claims)), AAD_AUTH);
+  return { auth, sealedBody };
+}
+
+/** Whether the console is sending the key in the clear, and why. */
+function sealingStatus() {
+  if (canSeal) return { sealed: true, why: 'requests are sealed; the API key stays here' };
+  return {
+    sealed: false,
+    why: 'this page is not a secure context, so the browser withholds WebCrypto — '
+       + 'the API key travels in cleartext. Reach the console over an SSH tunnel '
+       + '(http://127.0.0.1) or put TLS in front of it.',
+  };
+}
+
+async function api(path, { method = 'GET', body, markdown = false } = {}) {
+  const contentType = markdown ? 'text/markdown' : 'application/json';
+  let payload;
+  if (body !== undefined) payload = markdown ? body : JSON.stringify(body);
+
+  const key = await sealingKey();
+  const headers = {};
+  let wire = payload;
+  if (key) {
+    const { auth, sealedBody } = await sealRequest(key, method, path, payload, contentType);
+    headers['X-CC-Sealed'] = SEALED_VERSION;
+    headers['X-CC-Auth'] = auth;
+    if (sealedBody) {
+      headers['Content-Type'] = SEALED_MEDIA_TYPE;
+      wire = sealedBody;
+    }
+  } else {
+    headers['X-API-Key'] = apiKey;
+    if (payload !== undefined) headers['Content-Type'] = contentType;
+  }
+
   busy(1);
   let res;
   try {
-    res = await fetch(path, { method, headers, body: payload });
+    res = await fetch(path, { method, headers, body: wire });
   } catch (err) {
     busy(-1);
     $('#pulse').classList.add('error');
@@ -58,8 +174,33 @@ async function api(path, { method = 'GET', body, markdown = false } = {}) {
   busy(-1);
   $('#pulse').classList.remove('error');
 
-  const type = res.headers.get('content-type') || '';
-  const data = type.includes('json') ? await res.json().catch(() => null) : await res.text();
+  let type = res.headers.get('content-type') || '';
+  let text = null;
+  if (type.startsWith(SEALED_MEDIA_TYPE)) {
+    const raw = new Uint8Array(await res.arrayBuffer());
+    text = raw.length
+      ? new TextDecoder().decode(await openBytes(key, new TextDecoder().decode(raw), AAD_RESPONSE))
+      : '';
+    type = res.headers.get('X-CC-Type') || '';
+  }
+
+  let data;
+  if (!type.includes('json')) {
+    data = text !== null ? text : await res.text();
+  } else if (text !== null) {
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;   // same shape a malformed plaintext body gets, below
+    }
+  } else {
+    data = await res.json().catch(() => null);
+  }
+
+  if (res.status === 426) {
+    // The server takes sealed requests only and this browser cannot make them.
+    throw new ApiError(426, sealingStatus().why);
+  }
 
   if (res.status === 401) {
     openKeyDialog(
@@ -101,9 +242,25 @@ async function attempt(fn, { success } = {}) {
 // key dialog
 // --------------------------------------------------------------------------
 
+/** Say once, visibly, whether the key is about to cross the wire in the clear. */
+function showWireStatus() {
+  const status = sealingStatus();
+  const banner = $('#wirewarn');
+  banner.hidden = status.sealed;
+  banner.textContent = status.sealed ? '' : `Cleartext API key — ${status.why}`;
+  const note = $('#keyseal');
+  if (note) {
+    note.textContent = status.sealed
+      ? 'This page seals every request, so the key itself is never sent.'
+      : `Warning: ${status.why}`;
+    note.classList.toggle('reject', !status.sealed);
+  }
+}
+
 function openKeyDialog(problem) {
   const dialog = $('#keydialog');
   const error = $('#keyerror');
+  showWireStatus();
   // Without this the dialog just reappears after a rejected key, which reads
   // as a broken form rather than as "that key is wrong".
   error.textContent = problem || '';
@@ -160,12 +317,19 @@ function initTheme() {
  * URL, where it would land in logs and history.
  */
 async function streamInto(box, messageId, signal) {
+  const path = `/messages/${encodeURIComponent(messageId)}/stream`;
+  const key = await sealingKey();
+  let headers;
+  if (key) {
+    // A GET has no body to seal, so the auth envelope is the whole request.
+    const { auth } = await sealRequest(key, 'GET', path, undefined, null);
+    headers = { 'X-CC-Sealed': SEALED_VERSION, 'X-CC-Auth': auth };
+  } else {
+    headers = { 'X-API-Key': apiKey };
+  }
   let res;
   try {
-    res = await fetch(`/messages/${encodeURIComponent(messageId)}/stream`, {
-      headers: { 'X-API-Key': apiKey },
-      signal,
-    });
+    res = await fetch(path, { headers, signal });
   } catch {
     return;  // aborted, or the server went away; neither is worth a toast
   }
@@ -192,8 +356,19 @@ async function streamInto(box, messageId, signal) {
     // SSE frames are separated by a blank line; a partial frame stays buffered.
     const frames = buffer.split('\n\n');
     buffer = frames.pop();
-    for (const frame of frames) {
+    for (let frame of frames) {
       if (frame.startsWith(':')) continue;              // heartbeat comment
+      if (key) {
+        // Under sealing the frame is an envelope around the original frame;
+        // unwrap it and carry on as if it had arrived in the clear.
+        const [sealed] = sealedFrames(`${frame}\n\n`);
+        if (!sealed) continue;
+        try {
+          frame = new TextDecoder().decode(await openBytes(key, sealed, AAD_SSE)).trim();
+        } catch {
+          return;  // a frame that does not verify ends the read; do not guess
+        }
+      }
       if (frame.includes('event: end')) return;
       const data = frame.split('\n')
         .filter((l) => l.startsWith('data: '))
@@ -1731,5 +1906,6 @@ window.addEventListener('hashchange', route);
 initTheme();
 initKeyDialog();
 initProjectSelector();
+showWireStatus();
 if (!apiKey) openKeyDialog();
 route();

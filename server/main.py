@@ -80,6 +80,7 @@ from .pool import AgentPool
 from .projects import ProjectError, ProjectService
 from .registry import Registry, load_registry
 from .runner import AgentWorker, Job, SessionStore, resolve_claude_bin
+from .sealed import AUTH_HEADER, SEALED_HEADER, SealError, SealedSession
 from .store import ProjectStore, open_store
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -142,6 +143,11 @@ class Config:
     web_dir: Path | None = None
     #: `sqlite://<path>` or `kds://host:port[?fallback=sqlite]`
     store_url: str | None = None
+    #: Refuse plaintext API calls, so the key cannot reach the wire by accident.
+    #: Off by default: it breaks every `curl -H 'X-API-Key: ...'` in the docs,
+    #: and on loopback there is nothing to protect against. Turn it on with the
+    #: same breath as binding to 0.0.0.0 (`server/sealed.py`).
+    require_sealed: bool = False
 
     def __post_init__(self) -> None:
         self.home = Path(self.home).expanduser()
@@ -166,6 +172,8 @@ class Config:
             claude_bin=env("CC_AUTOMATION_CLAUDE_BIN"),
             web_dir=Path(env("CC_AUTOMATION_WEB_DIR")) if env("CC_AUTOMATION_WEB_DIR") else None,
             store_url=env("CC_AUTOMATION_STORE", DEFAULT_STORE_URL),
+            require_sealed=env("CC_AUTOMATION_REQUIRE_SEALED", "").lower()
+            in ("1", "true", "yes", "on"),
         )
 
     def resolve_api_key(self) -> str:
@@ -191,12 +199,114 @@ class AppState:
     logstore: LogStore
     status: StatusStore
     store: ProjectStore
+    #: The transport key derived from `api_key`, plus its replay guard.
+    sealed: SealedSession = None  # type: ignore[assignment]
     pool: AgentPool = None  # type: ignore[assignment]
     projects: ProjectService = None  # type: ignore[assignment]
 
     @property
     def workers(self) -> dict[str, AgentWorker]:
         return self.pool.workers
+
+
+#: Content type of a sealed body, in both directions.
+SEALED_MEDIA_TYPE = "application/cc-sealed"
+#: Carries the *inner* content type of a sealed response, so a client knows
+#: whether it unsealed JSON or Markdown without having to guess from the bytes.
+SEALED_TYPE_HEADER = "X-CC-Type"
+
+
+def _full_path(request: Request) -> str:
+    """Path and query as the claims sign it.
+
+    The query string is half the request on routes like `/tasks?status=failed`,
+    so it is signed too — otherwise a captured envelope could be re-pointed at a
+    different filter.
+    """
+    query = request.url.query
+    return f"{request.url.path}?{query}" if query else request.url.path
+
+
+async def _unseal_request(session: SealedSession, request: Request) -> tuple[bytes, str | None]:
+    auth = request.headers.get(AUTH_HEADER, "")
+    if not auth:
+        raise SealError("missing auth envelope")
+    body = await request.body()
+    return session.open_request(request.method, _full_path(request), auth, body)
+
+
+def _replace_body(request: Request, plain: bytes, content_type: str | None) -> None:
+    """Hand the routes the plaintext, as if it had arrived that way.
+
+    Starlette's `BaseHTTPMiddleware` replays whatever `request.body()` cached to
+    everything downstream, so overwriting that cache is all it takes — the
+    routes below never learn the request was sealed, which is why sealing
+    needed no changes to any of them.
+    """
+    request._body = plain
+    headers = [
+        (name, value)
+        for name, value in request.scope["headers"]
+        if name not in (b"content-length", b"content-type")
+    ]
+    headers.append((b"content-length", str(len(plain)).encode("latin-1")))
+    if content_type:
+        headers.append((b"content-type", content_type.encode("latin-1")))
+    request.scope["headers"] = headers
+
+
+def _passthrough_headers(response: Response) -> dict[str, str]:
+    """Everything but the framing, which sealing rewrites."""
+    return {
+        name: value
+        for name, value in response.headers.items()
+        if name.lower() not in ("content-length", "content-type")
+    }
+
+
+async def _seal_response(session: SealedSession, response: Response) -> Response:
+    inner_type = response.headers.get("content-type", "")
+    if inner_type.startswith("text/event-stream"):
+        return _seal_event_stream(session, response, inner_type)
+
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    headers = _passthrough_headers(response)
+    headers[SEALED_TYPE_HEADER] = inner_type
+    return Response(
+        content=session.seal_response(body),
+        status_code=response.status_code,
+        headers=headers,
+        media_type=SEALED_MEDIA_TYPE,
+    )
+
+
+def _seal_event_stream(
+    session: SealedSession, response: Response, inner_type: str
+) -> StreamingResponse:
+    """Seal an SSE feed frame by frame, because buffering it would defeat it.
+
+    The transport stays SSE — one `data:` line per frame — but the line holds an
+    envelope instead of the event JSON. Heartbeat comments pass through in the
+    clear: they carry nothing, and a reader that cannot see them cannot tell a
+    live connection from a stalled one.
+    """
+
+    async def frames():
+        async for chunk in response.body_iterator:
+            text = chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            if text.startswith(":"):
+                yield text
+                continue
+            yield f"data: {session.seal_event(text)}\n\n"
+
+    headers = _passthrough_headers(response)
+    headers[SEALED_TYPE_HEADER] = inner_type
+    return StreamingResponse(
+        frames(),
+        status_code=response.status_code,
+        headers=headers,
+        media_type="text/event-stream",
+    )
 
 
 def create_app(
@@ -210,9 +320,11 @@ def create_app(
         # Everything that can be wrong with the configuration is discovered
         # here, before the first request is served.
         registry = load_registry(config.agents_file)
+        api_key = config.resolve_api_key()
         state = AppState(
             config=config,
-            api_key=config.resolve_api_key(),
+            api_key=api_key,
+            sealed=SealedSession(api_key),
             registry=registry,
             dispatcher=Dispatcher(registry),
             sessions=SessionStore(config.state_dir / "sessions.json"),
@@ -248,8 +360,9 @@ def create_app(
 
         app.state.cc = state
         log.info(
-            "started with agents: %s (store: %s)",
+            "started with agents: %s (store: %s, sealed: %s)",
             ", ".join(registry.names), state.store.backend,
+            "required" if config.require_sealed else "optional",
         )
         try:
             yield
@@ -264,8 +377,30 @@ def create_app(
         path = request.url.path
         if path in UNAUTHENTICATED_PATHS or path.startswith(UNAUTHENTICATED_PREFIXES):
             return await call_next(request)
+
+        st: AppState = request.app.state.cc
+        if request.headers.get(SEALED_HEADER):
+            # A sealed request authenticates itself: only a holder of the API
+            # key can produce a tag that verifies, so there is no key on the
+            # wire to compare. `server/sealed.py` explains the trade against TLS.
+            try:
+                plain, content_type = await _unseal_request(st.sealed, request)
+            except SealError:
+                # One answer for every failure — bad tag, stale clock, replay,
+                # mismatched claims. Distinguishing them would let a caller
+                # probe the server with envelopes it cannot forge.
+                return JSONResponse({"detail": "sealed request rejected"}, status_code=401)
+            _replace_body(request, plain, content_type)
+            response = await call_next(request)
+            return await _seal_response(st.sealed, response)
+
+        if st.config.require_sealed:
+            return JSONResponse(
+                {"detail": "this server accepts sealed requests only; see OPERATING.md"},
+                status_code=426,
+            )
         presented = request.headers.get("X-API-Key", "")
-        expected = request.app.state.cc.api_key
+        expected = st.api_key
         if not hmac.compare_digest(presented, expected):
             return JSONResponse({"detail": "invalid or missing X-API-Key"}, status_code=401)
         return await call_next(request)

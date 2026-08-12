@@ -265,3 +265,36 @@ def test_the_hub_is_shared_by_every_worker(client):
     pool = client.app.state.cc.pool
     assert isinstance(pool.hub, StreamHub)
     assert all(w.hub is pool.hub for w in pool.workers.values())
+
+
+def test_a_sealed_stream_carries_ciphertext_frames(client):
+    """SSE under the sealed transport: the frames are envelopes, and the events
+    inside them are the same ones the plaintext route yields."""
+    from server.main import SEALED_MEDIA_TYPE  # noqa: F401
+    from server.sealed import AUTH_HEADER, SEALED_HEADER, VERSION, SealedSession
+
+    accepted = client.post(
+        "/messages", json={"text": "ping", "tags": ["alpha"]}, headers=AUTH
+    ).json()
+    wait_done(client, accepted["message_id"])
+
+    session = SealedSession(KEY)
+    path = f"/messages/{accepted['message_id']}/stream"
+    auth, _ = session.seal_request("GET", path, None, None)
+    resp = client.get(path, headers={SEALED_HEADER: VERSION, AUTH_HEADER: auth})
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    # Nothing the agent said survives in the clear.
+    assert "all done" not in resp.text
+    assert "session started" not in resp.text
+
+    unsealed = "".join(
+        session.open_event(line[6:])
+        for frame in resp.text.split("\n\n") if frame.strip()
+        for line in frame.splitlines() if line.startswith("data: ")
+    )
+    assert [e["kind"] for e in sse_events(unsealed)] == [
+        "start", "notice", "tool", "tool_result", "text", "result", "end",
+    ]
+    assert "event: end" in unsealed

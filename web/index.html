@@ -37,6 +37,10 @@
     </div>
   </header>
 
+  <!-- Shown only when this browser cannot seal, so a cleartext key is never a
+       silent condition. app.js fills it in; see sealingStatus(). -->
+  <div id="wirewarn" class="wirewarn" hidden></div>
+
   <main id="view" aria-live="polite"></main>
 
   <div id="toasts" class="toasts"></div>
@@ -45,10 +49,10 @@
     <form method="dialog" id="keyform">
       <h2>API key</h2>
       <p class="muted">
-        Every request needs <code>X-API-Key</code>. The key is read from
-        <code>~/.cc-automation/api_key</code> on the server; paste the same value
-        here. It is kept in this browser's localStorage only.
+        The key is read from <code>~/.cc-automation/api_key</code> on the server;
+        paste the same value here. It is kept in this browser's localStorage only.
       </p>
+      <p id="keyseal" class="muted"></p>
       <p id="keyerror" class="reject" hidden></p>
       <input type="password" id="keyinput" placeholder="paste the key" autocomplete="off" spellcheck="false">
       <label class="row" style="gap:6px;margin:-8px 0 14px">

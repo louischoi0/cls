@@ -40,6 +40,8 @@ EXPORTS = [
     "sessionRows", "sessionTable",
     "activityBadge", "parseCommand", "describeCommand", "commandHistory",
     "configSection",
+    "b64uEncode", "b64uDecode", "sealedEnvelope", "parseEnvelope", "hex",
+    "sealedFrames",
 ]
 
 
@@ -963,3 +965,122 @@ def test_instructions_render_as_markdown_and_say_so_when_absent(js):
 
     none = js("agentState", _state(system_prompt=None))
     assert "No instructions" in none
+
+
+# --- the sealed transport's pure half --------------------------------------- #
+
+# The crypto is in app.js, which QuickJS cannot run — no WebCrypto. What is
+# testable is the framing, which is why it lives in render.js: a base64url or a
+# nonce-length bug here would fail as "the tag did not verify", miles from the
+# cause.
+
+
+def test_base64url_round_trips_every_byte(js):
+    """All 256 values, and every length mod 3, since padding is where it breaks."""
+    assert js.ctx.eval(
+        """
+        (() => {
+          for (let len = 0; len < 40; len++) {
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) bytes[i] = (i * 7 + len) & 0xff;
+            const back = b64uDecode(b64uEncode(bytes));
+            if (back.length !== len) return `length ${len} -> ${back.length}`;
+            for (let i = 0; i < len; i++) {
+              if (back[i] !== bytes[i]) return `byte ${i} of ${len}`;
+            }
+          }
+          const all = new Uint8Array(256);
+          for (let i = 0; i < 256; i++) all[i] = i;
+          const back = b64uDecode(b64uEncode(all));
+          for (let i = 0; i < 256; i++) if (back[i] !== i) return `value ${i}`;
+          return 'ok';
+        })()
+        """
+    ) == "ok"
+
+
+def test_base64url_output_is_url_safe(js):
+    assert js.ctx.eval(
+        """
+        (() => {
+          const bytes = new Uint8Array(256);
+          for (let i = 0; i < 256; i++) bytes[i] = i;
+          return /^[A-Za-z0-9_-]+$/.test(b64uEncode(bytes)) ? 'ok' : b64uEncode(bytes);
+        })()
+        """
+    ) == "ok"
+
+
+def test_base64url_matches_python(js):
+    """Both ends must agree; python's urlsafe_b64encode is the reference."""
+    import base64
+
+    raw = bytes(range(64))
+    expected = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    got = js.ctx.eval(
+        "b64uEncode(new Uint8Array([%s]))" % ",".join(str(b) for b in raw)
+    )
+    assert got == expected
+
+
+@pytest.mark.parametrize("bad", ["!!!", "ab*c", "a"])
+def test_base64url_refuses_what_is_not_base64url(js, bad):
+    assert js.ctx.eval(f"String(b64uDecode({json.dumps(bad)}))") == "null"
+
+
+def test_an_envelope_round_trips_through_its_framing(js):
+    assert js.ctx.eval(
+        """
+        (() => {
+          const nonce = new Uint8Array(12).fill(7);
+          const ct = new Uint8Array([1, 2, 3, 4, 5]);
+          const text = sealedEnvelope('v1', nonce, ct);
+          if (!text.startsWith('v1.')) return text;
+          const parts = parseEnvelope(text, 'v1');
+          if (!parts) return 'did not parse';
+          if (parts.nonce.length !== 12) return 'nonce length';
+          if (parts.ciphertext[4] !== 5) return 'ciphertext';
+          return 'ok';
+        })()
+        """
+    ) == "ok"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",                       # nothing
+        "v1.aaaa",                # two parts
+        "v2.AAAAAAAAAAAAAAAA.Ag", # another version
+        "v1..Ag",                 # no nonce
+        "v1.AAAAAAAAAAAAAAAA.",   # no ciphertext
+        "v1.AAAA.Ag",             # nonce too short
+    ],
+)
+def test_parse_envelope_refuses_malformed_input(js, bad):
+    assert js.ctx.eval(f"String(parseEnvelope({json.dumps(bad)}, 'v1'))") == "null"
+
+
+def test_hex_matches_python(js):
+    assert js.ctx.eval("hex(new Uint8Array([0, 15, 16, 255]))") == "000f10ff"
+
+
+def test_sealed_frames_drops_heartbeats_and_keeps_envelopes(js):
+    body = ": ping\n\ndata: v1.aaa.bbb\n\ndata: v1.ccc.ddd\n\n"
+    assert js.ctx.eval(f"sealedFrames({json.dumps(body)}).join('|')") == (
+        "v1.aaa.bbb|v1.ccc.ddd"
+    )
+
+
+def test_app_js_never_sends_the_key_when_it_can_seal():
+    """The one property the whole feature rests on, asserted against the source:
+    `X-API-Key` may only be set on the branch where sealing is unavailable."""
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    lines = app.splitlines()
+    uses = [n for n, line in enumerate(lines) if "'X-API-Key'" in line]
+    assert len(uses) == 2, "api() and streamInto() are the only two callers"
+    for n in uses:
+        # Each has to sit in the `else` of `if (key)` — the branch reached only
+        # when this browser has no WebCrypto and the banner is already up.
+        preceding = "\n".join(lines[max(0, n - 4):n])
+        assert "} else {" in preceding, lines[n]

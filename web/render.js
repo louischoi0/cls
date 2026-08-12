@@ -886,3 +886,95 @@ function commandHistory(lines) {
                 title="Put this back on the command line">${line}</button>`)}
     </div>`;
 }
+
+// --------------------------------------------------------------------------
+// sealed transport — the pure half
+// --------------------------------------------------------------------------
+
+/* Envelope framing for the sealed channel (server/sealed.py). The crypto
+ * itself lives in app.js because it needs WebCrypto; everything here is string
+ * and byte shuffling, which is what makes it testable without a browser.
+ *
+ * base64url is hand-rolled rather than btoa/atob on purpose: those two are
+ * browser globals that QuickJS does not have, and they speak binary strings
+ * rather than Uint8Array, which means a round trip through them is one more
+ * place for a byte to be mangled.
+ */
+
+const B64U = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+/** Uint8Array -> unpadded base64url. */
+function b64uEncode(bytes) {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i];
+    const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    const word = (a << 16) | (b << 8) | c;
+    out += B64U[(word >> 18) & 63] + B64U[(word >> 12) & 63];
+    if (i + 1 < bytes.length) out += B64U[(word >> 6) & 63];
+    if (i + 2 < bytes.length) out += B64U[word & 63];
+  }
+  return out;
+}
+
+/** Unpadded base64url -> Uint8Array. Null on anything that is not one. */
+function b64uDecode(text) {
+  if (typeof text !== 'string') return null;
+  const clean = text.replace(/=+$/, '');
+  if (!/^[A-Za-z0-9_-]*$/.test(clean)) return null;
+  if (clean.length % 4 === 1) return null;   // no byte count produces this
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  let word = 0;
+  let bits = 0;
+  let n = 0;
+  for (const ch of clean) {
+    word = (word << 6) | B64U.indexOf(ch);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[n++] = (word >> bits) & 0xff;
+    }
+  }
+  return out.subarray(0, n);
+}
+
+/** `v1.<nonce>.<ciphertext>` from its parts. */
+function sealedEnvelope(version, nonce, ciphertext) {
+  return `${version}.${b64uEncode(nonce)}.${b64uEncode(ciphertext)}`;
+}
+
+/** The inverse, or null. Null covers every malformed case, so a caller has one
+ *  thing to check rather than a family of exceptions. */
+function parseEnvelope(text, version) {
+  if (typeof text !== 'string') return null;
+  const parts = text.trim().split('.');
+  if (parts.length !== 3 || parts[0] !== version) return null;
+  const nonce = b64uDecode(parts[1]);
+  const ciphertext = b64uDecode(parts[2]);
+  if (!nonce || !ciphertext || nonce.length !== 12 || !ciphertext.length) return null;
+  return { nonce, ciphertext };
+}
+
+/** Bytes -> lowercase hex, for the body digest the claims carry. */
+function hex(bytes) {
+  let out = '';
+  for (const byte of bytes) out += byte.toString(16).padStart(2, '0');
+  return out;
+}
+
+/** The SSE frames out of a sealed stream body, still sealed.
+ *
+ * Heartbeat comments pass through the server in the clear, so they are dropped
+ * here rather than handed to a decrypt that would fail on them.
+ */
+function sealedFrames(text) {
+  const out = [];
+  for (const frame of text.split('\n\n')) {
+    if (!frame.trim() || frame.startsWith(':')) continue;
+    for (const line of frame.split('\n')) {
+      if (line.startsWith('data: ')) out.push(line.slice(6));
+    }
+  }
+  return out;
+}
