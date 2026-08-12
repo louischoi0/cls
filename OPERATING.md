@@ -170,7 +170,8 @@ Operator-facing points:
 .venv/bin/python -m pytest -q
 ```
 
-190 tests. They use a fake `claude` script (and, for the project tests, an
+435 tests, 47 of which skip without a `kds_server` binary (see **The project
+store**). They use a fake `claude` script (and, for the project tests, an
 `AgentWorker` whose subprocess is a scripted reply), so they spend nothing and
 need no network. That also means the planning round has never been exercised
 against the real CLI — the JSON-plan parser is tested against the shapes models
