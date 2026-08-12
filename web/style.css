@@ -13,6 +13,39 @@
  * rail. That was the gap.
  */
 
+/* Korean, made legible without changing anything else.
+ *
+ * The mono stack below is Latin-only — ui-monospace, Menlo, Consolas have no
+ * Hangul — so Korean fell through to whatever the browser picked last, at the
+ * Latin face's size. Hangul has a larger visual centre than Latin at the same
+ * px, so that fallback reads small, thin and cramped.
+ *
+ * This binds a real Hangul face to the Hangul ranges *only*. Everything
+ * outside them falls through to the next family in the stack, so Latin, code,
+ * paths and the box-drawing glyphs stay exactly as they were — this is not a
+ * different font for the page, it is a different font for one script.
+ *
+ * `local()` all the way down: no download, no CDN, no network. Korean coding
+ * faces come first because this is a terminal, then the platform UI faces that
+ * are actually installed on macOS, Windows and Linux.
+ */
+@font-face {
+  font-family: "HangulTerm";
+  src: local("D2Coding"), local("D2Coding ligature"), local("NanumGothicCoding"),
+       local("Apple SD Gothic Neo"), local("AppleSDGothicNeo-Regular"),
+       local("Malgun Gothic"), local("MalgunGothic"),
+       local("Noto Sans KR"), local("Noto Sans CJK KR"), local("NotoSansKR-Regular"),
+       local("NanumGothic"), local("NanumBarunGothic"), local("Source Han Sans KR"),
+       local("Pretendard"), local("Spoqa Han Sans Neo");
+  /* Jamo, compatibility jamo, extended jamo, the syllable block, halfwidth. */
+  unicode-range: U+1100-11FF, U+3130-318F, U+A960-A97F,
+                 U+AC00-D7A3, U+D7B0-D7FF, U+FFA0-FFDC;
+  /* Hangul is optically smaller than Latin at one px size; this brings the two
+     back onto the same visual line rather than making Korean shout. */
+  size-adjust: 112%;
+  font-display: swap;
+}
+
 :root {
   --bg: #f4f4f1;
   --panel: #fbfbf9;
@@ -28,7 +61,9 @@
   --running: #1f6ba8;
   --done: #1f6b45;
   --failed: #a3372c;
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  /* "HangulTerm" is first but covers only the Hangul ranges, so it claims
+     Korean and nothing else; Latin carries on to ui-monospace as before. */
+  --mono: "HangulTerm", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
   /* The one horizontal gutter. Rail rows, title line, transcript and prompt
      all use it, so their text sits on a single vertical line. */
@@ -374,7 +409,11 @@ code, .md-code {
 
 .turn-text {
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  /* `anywhere` breaks Korean between syllables, which reads as broken words.
+     `keep-all` holds them together and `break-word` still rescues a long
+     unbroken path or URL. */
+  word-break: keep-all;
+  overflow-wrap: break-word;
   margin-top: 1px;
   line-height: 1.62;
 }

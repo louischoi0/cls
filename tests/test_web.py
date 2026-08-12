@@ -743,3 +743,56 @@ def test_a_javascript_link_is_defused(js):
 def test_the_markdown_toggle_is_in_the_status_line():
     page = (WEB / "index.html").read_text(encoding="utf-8")
     assert 'id="md-toggle"' in page and "aria-label=" in page.split('id="md-toggle"')[1][:200]
+
+
+# --- Korean ------------------------------------------------------------------ #
+
+
+def test_hangul_gets_a_face_of_its_own():
+    """The mono stack is Latin-only, so Korean fell through to whatever the
+    browser picked last, at the Latin face's metrics."""
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    face = css.split("@font-face {")[1].split("}")[0]
+    assert 'font-family: "HangulTerm"' in face
+    assert "local(" in face and "http" not in face      # no download, no CDN
+    assert "size-adjust" in face
+
+
+def test_the_hangul_face_is_restricted_to_hangul():
+    """Without a unicode-range it would claim Latin too, and the console would
+    stop being monospace."""
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    face = css.split("@font-face {")[1].split("}")[0]
+    ranges = face.split("unicode-range:")[1].split(";")[0]
+    assert "U+AC00-D7A3" in ranges      # the syllable block
+    assert "U+3130-318F" in ranges      # compatibility jamo
+    # Nothing in the Latin or ASCII range may be claimed.
+    assert "U+0000" not in ranges and "U+0020" not in ranges
+
+
+def test_the_hangul_face_comes_first_but_only_wins_for_hangul():
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    mono = [l for l in css.splitlines() if l.strip().startswith("--mono:")][0]
+    assert mono.index('"HangulTerm"') < mono.index("ui-monospace")
+    assert "monospace" in mono          # Latin still ends at a mono generic
+
+
+def test_korean_words_are_not_broken_between_syllables():
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    rule = css.split(".turn-text {")[1].split("}")[0]
+    assert "word-break: keep-all" in rule
+    # ...but a long unbroken path must still be rescued.
+    assert "overflow-wrap: break-word" in rule
+
+
+def test_korean_survives_escaping_and_markdown(js):
+    korean = "# 안녕하세요\n\n**세션**을 만들었습니다. `chat.db`에 저장됩니다.\n\n- 첫째\n- 둘째"
+    out = js("renderMarkdown", korean)
+    assert "<h1>안녕하세요</h1>" in out
+    assert "<strong>세션</strong>을 만들었습니다" in out
+    assert "<li>첫째</li>" in out
+
+
+def test_korean_in_a_turn_is_not_mangled(js):
+    out = js("chatBubble", {"role": "user", "text": "세션 목록을 보여줘"})
+    assert "세션 목록을 보여줘" in out
