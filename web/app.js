@@ -239,6 +239,31 @@ async function attempt(fn, { success } = {}) {
   }
 }
 
+/** Put text on the clipboard, reporting what actually happened.
+ *
+ * `navigator.clipboard` exists only in secure contexts — over plain HTTP from
+ * another machine it is undefined, so fall back to the deprecated
+ * execCommand path, which still works inside a click handler.
+ */
+async function copyText(text) {
+  if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch { /* denied — try the fallback below */ }
+  }
+  const scratch = document.createElement('textarea');
+  scratch.value = text;
+  scratch.style.position = 'fixed';
+  scratch.style.opacity = '0';
+  document.body.append(scratch);
+  scratch.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { /* leave ok false */ }
+  scratch.remove();
+  return ok;
+}
+
 // --------------------------------------------------------------------------
 // key dialog
 // --------------------------------------------------------------------------
@@ -686,8 +711,10 @@ function initChat() {
     if (e.target.id === 'chat-clear') clearHistory();
     const copy = e.target.closest('[data-copy]');
     if (copy) {
-      navigator.clipboard?.writeText(copy.dataset.copy);
-      toast('copied');
+      copyText(copy.dataset.copy).then((ok) => {
+        if (ok) toast('copied');
+        else toast('copy failed — select the id and copy by hand', 'error');
+      });
     }
   });
 
